@@ -439,6 +439,58 @@ async function forceFinalizeGhost(ghost, reason) {
   console.warn(`[Ghost] FORCE-finalized ${ghost.positionId} ${ghost.symbol} (${reason}) peak=+${(ghost.peakRRPos||0).toFixed(2)}R`);
 }
 
+
+// ── TEGENPOSITIE-CONTEXT (alleen meten, niets blokkeren) ─────────────────────
+// Staat er op ditzelfde symbool een positie open in de TEGENGESTELDE richting?
+// Zo ja: hoe ver liggen de entries uit elkaar, uitgedrukt in R van die open trade?
+//
+// De meetkunde (rr = 1.5): de TP van deze "hedge" ligt voorbij de SL van de open
+// positie, TENZIJ  gap > (rr - 1) x slDist  ->  gap > 0.5 x slDist.
+// Alleen boven die drempel kan de hedge zijn doel halen zonder dat de eerste trade
+// gegarandeerd al gestopt is.
+//
+// Dit VERANDERT NIETS aan het gedrag. De demo neemt in collect-mode gewoon elk
+// signaal. We leggen alleen vast wat er gebeurde, zodat later meetbaar is of zo'n
+// tegensignaal op zichzelf positieve EV heeft (break-even winrate bij 1.5RR = 40%).
+function getCounterContext(symbol, direction, newEntry, tpRR) {
+  const out = {
+    hasCounterPos: false, counterPosId: null, counterGap: null,
+    counterGapR: null, counterSafeHedge: null, counterAgeMin: null,
+    openPosCount: openPositions.size,
+  };
+  if (newEntry == null) return out;
+
+  let best = null;
+  for (const [id, p] of openPositions.entries()) {
+    if (p.ghostFinalized || p.mt5Closed) continue;      // alleen ECHT open op MT5
+    if (p.symbol !== symbol) continue;
+    if (p.direction === direction) continue;            // moet tegengesteld zijn
+    if (!best || new Date(p.openedAt) > new Date(best.p.openedAt)) best = { id, p };
+  }
+  if (!best) return out;
+
+  const p      = best.p;
+  const entry  = safeNum(p.entry);
+  const sl     = safeNum(p.sl);
+  if (entry == null || sl == null) return out;
+  const slDist = Math.abs(entry - sl);
+  if (!(slDist > 0)) return out;
+
+  const gap    = Math.abs(newEntry - entry);
+  const gapR   = gap / slDist;
+  const rr     = tpRR ?? 1.5;
+
+  out.hasCounterPos    = true;
+  out.counterPosId     = best.id;
+  out.counterGap       = parseFloat(gap.toFixed(5));
+  out.counterGapR      = parseFloat(gapR.toFixed(3));
+  out.counterSafeHedge = gapR > (rr - 1);              // 1.5RR -> gap moet > 0.5R
+  out.counterAgeMin    = p.openedAt
+    ? parseFloat(((Date.now() - new Date(p.openedAt).getTime()) / 60000).toFixed(1))
+    : null;
+  return out;
+}
+
 async function finalizeGhost(ghost) {
   const elapsedMilestones = msToElapsed(ghost.rrMilestones, ghost.openedAt);
   await db.saveGhostTrade({
@@ -932,6 +984,12 @@ app.post("/webhook", async (req, res) => {
     dayLow:      safeNum(day_low),
   };
 
+  // Tegenpositie-context: puur meten. Blokkeert niets.
+  const counter = getCounterContext(symbol, direction, tvEntry, getTpRR(symbol, new Date()));
+  if (counter.hasCounterPos) {
+    console.log(`[Counter] ${symbol} ${direction} tegen open ${counter.counterPosId} | gap=${counter.counterGapR}R | veilige-hedge=${counter.counterSafeHedge} | open ${counter.counterAgeMin}min`);
+  }
+
   let vwapBandPct = null;
   if (tvEntry != null && vwapMid != null && wh.vwapUpper != null) {
     const halfBand = Math.abs(wh.vwapUpper - vwapMid);
@@ -946,7 +1004,7 @@ app.post("/webhook", async (req, res) => {
     const scored = scoreSignal(feats);
     _modelDecId  = await db.saveModelDecision({ optimizerKey: optKey, symbol, features: feats, score: scored.score, decision: scored.decision, reason: scored.reason, mode: MODEL_MODE });
     if (MODEL_MODE === "live" && scored.decision === "skip") {
-      await db.logSignal({ symbol, assetType: symInfo.type, direction, session, vwapPosition: vwapPos, optimizerKey: optKey, tvEntry, slPct, vwapMid, vwapBandPct, ...wh, outcome: "MODEL_SKIP", rejectReason: scored.reason, latencyMs: Date.now() - t0 });
+      await db.logSignal({ symbol, assetType: symInfo.type, direction, session, vwapPosition: vwapPos, optimizerKey: optKey, tvEntry, slPct, vwapMid, vwapBandPct, ...wh, outcome: "MODEL_SKIP", rejectReason: scored.reason, latencyMs: Date.now() - t0, ...counter });
       await db.markInboxProcessed(_inboxId, "MODEL_SKIP").catch(() => {});
       console.log(`[Model] LIVE skip: ${optKey} (${scored.reason})`);
       return res.json({ ok: false, reason: "MODEL_SKIP", detail: scored.reason });
@@ -1033,13 +1091,13 @@ app.post("/webhook", async (req, res) => {
     }
     if (!positionId) {
       console.warn(`[Webhook] ORDER_NOT_CONFIRMED: ${symbol} ${direction} session=${session} circuitOpen=${_circuitOpen}`);
-      await db.logSignal({ dailyLabel: null, symbol, assetType: symInfo.type, direction, session, vwapPosition: vwapPos, optimizerKey: optKey, tvEntry, slPct, vwapMid, vwapBandPct, ...wh, outcome: "ORDER_NOT_CONFIRMED", rejectReason: "No positionId from MetaAPI", latencyMs: Date.now() - t0 });
+      await db.logSignal({ dailyLabel: null, symbol, assetType: symInfo.type, direction, session, vwapPosition: vwapPos, optimizerKey: optKey, tvEntry, slPct, vwapMid, vwapBandPct, ...wh, outcome: "ORDER_NOT_CONFIRMED", rejectReason: "No positionId from MetaAPI", latencyMs: Date.now() - t0, ...counter });
       await db.markInboxProcessed(_inboxId, "ORDER_NOT_CONFIRMED").catch(() => {});
       return res.status(202).json({ ok: false, reason: "ORDER_NOT_CONFIRMED" });
     }
   } catch (e) {
     console.error(`[Webhook] placeOrder error: ${e.message}`);
-    await db.logSignal({ symbol, assetType: symInfo.type, direction, session, vwapPosition: vwapPos, optimizerKey: optKey, tvEntry, slPct, vwapMid, vwapBandPct, ...wh, outcome: "ERROR", rejectReason: e.message, latencyMs: Date.now() - t0 });
+    await db.logSignal({ symbol, assetType: symInfo.type, direction, session, vwapPosition: vwapPos, optimizerKey: optKey, tvEntry, slPct, vwapMid, vwapBandPct, ...wh, outcome: "ERROR", rejectReason: e.message, latencyMs: Date.now() - t0, ...counter });
     await db.markInboxProcessed(_inboxId, "ERROR", null, e.message).catch(() => {});
     return res.status(500).json({ error: e.message });
   }
@@ -1059,7 +1117,7 @@ app.post("/webhook", async (req, res) => {
   openPositions.set(positionId, pos);
 
   await db.saveGhostState(pos.ghost);
-  await db.logSignal({ dailyLabel, symbol, assetType: symInfo.type, direction, session, vwapPosition: vwapPos, optimizerKey: optKey, tvEntry, slPct, vwapMid, vwapBandPct, ...wh, outcome: "PLACED", latencyMs: Date.now() - t0, positionId });
+  await db.logSignal({ dailyLabel, symbol, assetType: symInfo.type, direction, session, vwapPosition: vwapPos, optimizerKey: optKey, tvEntry, slPct, vwapMid, vwapBandPct, ...wh, outcome: "PLACED", latencyMs: Date.now() - t0, positionId , ...counter });
 
   console.log(`[Placed] ${positionId} ${symbol} ${direction} lots=${lots} entry=${execPrice} sl=${slPrice} tp=${tpPrice} ${dailyLabel}`);
   markWebhookPlaced(rawSym||"", direction);
