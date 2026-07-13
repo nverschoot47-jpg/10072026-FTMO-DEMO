@@ -409,8 +409,10 @@ async function logSignal(data) {
         daily_label, symbol, asset_type, direction, session, vwap_position, optimizer_key,
         tv_entry, sl_pct, sl_points, vwap_mid, vwap_upper, vwap_lower, vwap_band_pct,
         session_high, session_low, day_high, day_low,
-        outcome, reject_reason, latency_ms, position_id, data_flags
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+        outcome, reject_reason, latency_ms, position_id, data_flags,
+        has_counter_pos, counter_pos_id, counter_gap, counter_gap_r,
+        counter_safe_hedge, counter_age_min, open_pos_count
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
     `, [
       data.dailyLabel    ?? null,
       data.symbol        ?? null, data.assetType  ?? null,
@@ -424,6 +426,13 @@ async function logSignal(data) {
       data.outcome       ?? null, data.rejectReason ?? null,
       data.latencyMs     ?? null, data.positionId ?? null,
       flags.length ? JSON.stringify(flags) : null,
+      data.hasCounterPos ?? false,
+      data.counterPosId ?? null,
+      data.counterGap ?? null,
+      data.counterGapR ?? null,
+      data.counterSafeHedge ?? null,
+      data.counterAgeMin ?? null,
+      data.openPosCount ?? null,
     ]);
   } catch (e) { console.warn("[!] logSignal:", e.message); }
 }
