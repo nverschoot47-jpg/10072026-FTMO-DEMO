@@ -452,39 +452,45 @@ async function forceFinalizeGhost(ghost, reason) {
 // Dit VERANDERT NIETS aan het gedrag. De demo neemt in collect-mode gewoon elk
 // signaal. We leggen alleen vast wat er gebeurde, zodat later meetbaar is of zo'n
 // tegensignaal op zichzelf positieve EV heeft (break-even winrate bij 1.5RR = 40%).
-function getCounterContext(symbol, direction, newEntry, tpRR) {
+function getCounterContext(symbol, direction, newTvEntry) {
   const out = {
     hasCounterPos: false, counterPosId: null, counterGap: null,
     counterGapR: null, counterSafeHedge: null, counterAgeMin: null,
     openPosCount: openPositions.size,
   };
-  if (newEntry == null) return out;
+  if (newTvEntry == null) return out;
 
   let best = null;
   for (const [id, p] of openPositions.entries()) {
-    if (p.ghostFinalized || p.mt5Closed) continue;      // alleen ECHT open op MT5
+    if (p.ghostFinalized || p.mt5Closed) continue;   // alleen ECHT open op MT5
     if (p.symbol !== symbol) continue;
-    if (p.direction === direction) continue;            // moet tegengesteld zijn
+    if (p.direction === direction) continue;         // moet tegengesteld zijn
     if (!best || new Date(p.openedAt) > new Date(best.p.openedAt)) best = { id, p };
   }
   if (!best) return out;
+  const p = best.p;
 
-  const p      = best.p;
-  const entry  = safeNum(p.entry);
-  const sl     = safeNum(p.sl);
-  if (entry == null || sl == null) return out;
-  const slDist = Math.abs(entry - sl);
-  if (!(slDist > 0)) return out;
+  // ── KRITIEK: alles in DEZELFDE prijsschaal ────────────────────────────────
+  // tvEntry = FUTURES-prijs (MGC1! ~4115.9). p.entry = BROKER-fill (XAUUSD ~4120.5).
+  // Die twee aftrekken meet het basisverschil futures-vs-broker, NIET de afstand
+  // tussen twee signalen. Daarom vergelijken we tvEntry met tvEntry, en drukken we
+  // de SL-afstand ook in futures-termen uit (slPct x buffer x futures-prijs).
+  const refTv = safeNum(p.tvEntry);
+  const refSlPct = safeNum(p.slPct);
+  if (refTv == null || refSlPct == null || !(refTv > 0)) return out;
 
-  const gap    = Math.abs(newEntry - entry);
-  const gapR   = gap / slDist;
-  const rr     = tpRR ?? 1.5;
+  const slDistTv = refSlPct * SL_BUFFER_MULT * refTv;   // SL-afstand in futures-punten
+  if (!(slDistTv > 0)) return out;
+
+  const gap  = Math.abs(newTvEntry - refTv);
+  const gapR = gap / slDistTv;
+  const rr   = p.tpRR ?? 1.5;   // de RR van de OPEN positie bepaalt de drempel
 
   out.hasCounterPos    = true;
   out.counterPosId     = best.id;
   out.counterGap       = parseFloat(gap.toFixed(5));
   out.counterGapR      = parseFloat(gapR.toFixed(3));
-  out.counterSafeHedge = gapR > (rr - 1);              // 1.5RR -> gap moet > 0.5R
+  out.counterSafeHedge = gapR > (rr - 1);   // bij 1.5RR: gap moet > 0.5R
   out.counterAgeMin    = p.openedAt
     ? parseFloat(((Date.now() - new Date(p.openedAt).getTime()) / 60000).toFixed(1))
     : null;
@@ -985,7 +991,7 @@ app.post("/webhook", async (req, res) => {
   };
 
   // Tegenpositie-context: puur meten. Blokkeert niets.
-  const counter = getCounterContext(symbol, direction, tvEntry, getTpRR(symbol, new Date()));
+  const counter = getCounterContext(symbol, direction, tvEntry);
   if (counter.hasCounterPos) {
     console.log(`[Counter] ${symbol} ${direction} tegen open ${counter.counterPosId} | gap=${counter.counterGapR}R | veilige-hedge=${counter.counterSafeHedge} | open ${counter.counterAgeMin}min`);
   }
