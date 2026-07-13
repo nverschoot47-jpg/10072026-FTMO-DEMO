@@ -617,10 +617,6 @@ async function loadAllGhostStates() {
         CAST(max_rr AS FLOAT) AS "maxRR",
         CAST(peak_rr_pos AS FLOAT) AS "peakRRPos",
         CAST(peak_rr_neg AS FLOAT) AS "peakRRNeg",
-        milestones_estimated AS "estimatedCount",
-        CAST(blackout_min AS FLOAT) AS "blackoutMin",
-        finalize_reason AS "finalizeReason",
-        data_complete AS "dataComplete",
         rr_milestones AS "rrMilestones",
         mt5_closed_tp AS "mt5ClosedTP", mt5_close_at AS "mt5CloseAt",
         phantom_sl_hit AS "phantomSLHit", sl_hit_at AS "slHitAt",
@@ -744,11 +740,15 @@ async function loadGhostTrades(from = null, to = null, limit = 300) {
         CAST(day_low AS FLOAT) AS "dayLow",
         CAST(peak_rr_pos AS FLOAT) AS "peakRRPos",
         CAST(peak_rr_neg AS FLOAT) AS "peakRRNeg",
+        finalize_reason AS "finalizeReason",
+        data_complete AS "dataComplete",
+        milestones_estimated AS "estimatedCount",
+        CAST(blackout_min AS FLOAT) AS "blackoutMin",
         rr_milestones AS "rrMilestones",
         time_to_sl_min AS "timeToSLMin",
         mt5_close_reason AS "mt5CloseReason",
         mt5_comment AS "mt5Comment",
-        opened_at AS "openedAt", COALESCE(closed_at, sl_hit_at, created_at) AS "closedAt"
+        opened_at AS "openedAt", COALESCE(closed_at, created_at) AS "closedAt"
       FROM ghost_trades
       ${where}
       ORDER BY opened_at DESC NULLS LAST
