@@ -626,9 +626,38 @@ async function syncPositions() {
     }
 
     const liveMT5 = await getPositions();
+
+    // ── VEILIGHEIDSGUARD (was OMGEKEERD — kritieke bugfix) ────────────────────
+    // Oud gedrag: bij "MetaAPI 0 posities" werd liveIds op [] gezet. Maar closedIds
+    // = alles wat NIET in liveIds zit -> dus werd ELKE positie als GESLOTEN gezien,
+    // en zonder SL-reden AANGENOMEN als TP. De guard logde "skipping close detection"
+    // terwijl hij precies het omgekeerde deed: een nog OPEN positie werd afgeboekt
+    // als winst, en de ghost ging fantoom-tracken op een trade die nog liep.
+    //
+    // Nieuw: tel alleen posities die volgens ons ECHT open staan op MT5 (ghosts
+    // waarvan de MT5-positie al dicht is tellen niet mee). Ziet MetaAPI er 0 terwijl
+    // wij er wel verwachten, dan behandelen we ze als NOG LEVEND -> close detection
+    // wordt daadwerkelijk overgeslagen.
+    //
+    // Vangnet: blijft dit te lang duren, dan is het geen glitch meer. Na
+    // MAX_EMPTY_SYNCS laten we de normale detectie (die op MT5-deals kijkt) alsnog toe.
+    const activeMT5 = [...openPositions.entries()].filter(([, p]) => !p.mt5Closed && !p.ghostFinalized);
+    const suspicious = liveMT5.length === 0 && activeMT5.length > 0 && !_circuitOpen;
+
+    if (suspicious) {
+      _emptySyncs++;
+      if (_emptySyncs <= MAX_EMPTY_SYNCS) {
+        console.warn(`[Sync] MetaAPI meldt 0 posities maar ${activeMT5.length} zouden open moeten zijn — close detection OVERGESLAGEN (${_emptySyncs}/${MAX_EMPTY_SYNCS})`);
+      } else if (_emptySyncs === MAX_EMPTY_SYNCS + 1) {
+        console.error(`[Sync] MetaAPI meldt al ${_emptySyncs}x 0 posities — dit is geen glitch meer. Close detection weer AAN (MT5-deals bepalen de uitkomst).`);
+      }
+    } else {
+      _emptySyncs = 0;
+    }
+
     const liveIds = new Set(
-      (liveMT5.length === 0 && openPositions.size > 0 && !_circuitOpen)
-        ? (console.warn(`[Sync] MetaAPI 0 positions but ${openPositions.size} in memory — skipping close detection`), [])
+      (suspicious && _emptySyncs <= MAX_EMPTY_SYNCS)
+        ? activeMT5.map(([id]) => id)          // behandel als NOG OPEN -> echt overslaan
         : liveMT5.map(p => String(p.id))
     );
 
@@ -755,12 +784,26 @@ async function syncPositions() {
         await finalizeGhost(ghost);
       } else {
         if (ghost) {
-          ghost.mt5ClosedTP    = true;
+          // Was dit ECHT een TP? Alleen als MT5 het zelf zei, of als de exit-prijs
+          // bij de TP lag. Anders is de reden ONBEKEND -- niet stilzwijgend "tp".
+          //
+          // (Hier ging het mis bij je eerste trade: MetaAPI meldde 0 posities,
+          //  de omgekeerde guard boekte de positie af, en deze tak stempelde er
+          //  "tp" op. Er was geen TP: de equity was +12,50 terwijl een echte TP
+          //  +36,46 zou zijn geweest. De positie stond nog gewoon open.)
+          const proven = (closeSource === "mt5_reason" && closeReason === "tp")
+                      || (closeSource === "exit_price" && closeReason === "tp");
+
+          ghost.mt5ClosedTP    = proven;
           ghost.mt5CloseAt     = new Date().toISOString();
-          ghost.mt5CloseReason = "tp";
+          ghost.mt5CloseReason = proven ? "tp" : "unknown";
           pos.mt5Closed = true;
           await db.saveGhostState(ghost);
-          console.log(`[Ghost] MT5 TP hit for ${id} ${pos.symbol} — ghost tracking on`);
+          if (proven) {
+            console.log(`[Ghost] MT5 TP bevestigd voor ${id} ${pos.symbol} (${closeSource}) — ghost loopt door`);
+          } else {
+            console.warn(`[Ghost] ${id} ${pos.symbol}: MT5-positie weg maar GEEN bewijs van TP (${closeSource}) — reden=unknown, ghost loopt door`);
+          }
         } else {
           openPositions.delete(id);
         }
@@ -829,7 +872,11 @@ async function syncPositions() {
         pos.currentPrice = curPrice;
         const justHit = updateGhost(pos.ghost, curPrice);
         if (justHit) {
-          pos.ghost.mt5CloseReason = "tp";
+          // NIET overschrijven met "tp"! De MT5-sluitreden is al bepaald tijdens de
+          // close-detectie ("tp" als bewezen, anders "unknown"). Hier wordt alleen de
+          // FANTOOM-SL geraakt -- dat zegt niets over hoe MT5 de trade sloot.
+          // (Deze regel zette hier hard "tp" en maakte de eerlijke "unknown" ongedaan.)
+          if (!pos.ghost.mt5CloseReason) pos.ghost.mt5CloseReason = "unknown";
           await finalizeGhost(pos.ghost);
         } else {
           await db.saveGhostState(pos.ghost);
