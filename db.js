@@ -411,8 +411,9 @@ async function logSignal(data) {
         session_high, session_low, day_high, day_low,
         outcome, reject_reason, latency_ms, position_id, data_flags,
         has_counter_pos, counter_pos_id, counter_gap, counter_gap_r,
-        counter_safe_hedge, counter_age_min, open_pos_count
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
+        counter_safe_hedge, counter_age_min, open_pos_count,
+        vwap_dist_pct, vwap_dist_r, vwap_band_pct_r, sess_high_pct, sess_low_pct, sess_high_dist_r, sess_low_dist_r, sess_range_r, sess_range_pct, pos_in_sess_range, day_high_pct, day_low_pct, day_high_dist_r, day_low_dist_r, day_range_r, day_range_pct, pos_in_day_range, futures_broker_basis_pct, broker_vwap, broker_vwap_upper, broker_vwap_lower, broker_sess_high, broker_sess_low, broker_day_high, broker_day_low
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55)
     `, [
       data.dailyLabel    ?? null,
       data.symbol        ?? null, data.assetType  ?? null,
@@ -433,6 +434,31 @@ async function logSignal(data) {
       data.counterSafeHedge ?? null,
       data.counterAgeMin ?? null,
       data.openPosCount ?? null,
+      data.vwapDistPct ?? null,
+      data.vwapDistR ?? null,
+      data.vwapBandPctR ?? null,
+      data.sessHighPct ?? null,
+      data.sessLowPct ?? null,
+      data.sessHighDistR ?? null,
+      data.sessLowDistR ?? null,
+      data.sessRangeR ?? null,
+      data.sessRangePct ?? null,
+      data.posInSessRange ?? null,
+      data.dayHighPct ?? null,
+      data.dayLowPct ?? null,
+      data.dayHighDistR ?? null,
+      data.dayLowDistR ?? null,
+      data.dayRangeR ?? null,
+      data.dayRangePct ?? null,
+      data.posInDayRange ?? null,
+      data.futuresBrokerBasisPct ?? null,
+      data.brokerVwap ?? null,
+      data.brokerVwapUpper ?? null,
+      data.brokerVwapLower ?? null,
+      data.brokerSessHigh ?? null,
+      data.brokerSessLow ?? null,
+      data.brokerDayHigh ?? null,
+      data.brokerDayLow ?? null,
     ]);
   } catch (e) { console.warn("[!] logSignal:", e.message); }
 }
