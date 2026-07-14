@@ -279,18 +279,21 @@ function _stampCrossings(ghost, sign, from, to, max, now, gapStart, isBlackout) 
   for (let v = 0.1; v <= max + 1e-9; v = Math.round((v + 0.1) * 10) / 10) {
     const key = sign + v.toFixed(1);
     if (ghost.rrMilestones[key] != null) continue;
-    if (to < v - 1e-9) continue;                       // not reached yet
+    if (to < v - 1e-9) continue;                       // nog niet bereikt
 
     if (!isBlackout || v <= from + 1e-9) {
-      ghost.rrMilestones[key] = now;                   // observed live
+      ghost.rrMilestones[key] = now;                   // ECHT waargenomen
       continue;
     }
-    // Crossed while we were blind: place it inside the blackout window.
-    const span = to - from;
-    const frac = span > 1e-9 ? Math.min(1, Math.max(0, (v - from) / span)) : 1;
-    ghost.rrMilestones[key] = Math.round(gapStart + (now - gapStart) * frac);
-    ghost.estimatedCount = (ghost.estimatedCount || 0) + 1;
-    ghost.dataComplete   = false;                      // honest: this was inferred
+
+    // Gepasseerd terwijl we BLIND waren. We weten NIET wanneer.
+    // Dus: NIET invullen. Een gok is geen meting.
+    // (Eerder werd hier geinterpoleerd over het blackout-venster. Dat leverde
+    //  rijen vol "0m" op en suggereerde precisie die er niet was. Nu blijft de cel
+    //  gewoon leeg, en de rij vertelt zelf dat er gaten in zitten.)
+    ghost.missedCount  = (ghost.missedCount || 0) + 1;
+    ghost.estimatedCount = (ghost.estimatedCount || 0) + 1;   // telt als niet-schoon
+    ghost.dataComplete = false;
   }
 }
 
@@ -1269,6 +1272,7 @@ app.get("/api/open-positions", (req, res) => {
   for (const [id, pos] of openPositions) {
     const g = pos.ghost;
     out.push({ positionId: id, dailyLabel: pos.dailyLabel, symbol: pos.symbol, assetType: pos.assetType, direction: pos.direction, session: pos.session, vwapPosition: pos.vwapPosition, optimizerKey: pos.optimizerKey, entry: pos.entry, sl: pos.sl, tp: pos.tp, lots: pos.lots, riskEur: pos.riskEur, slPct: pos.slPct, slDist: pos.slDist, tvEntry: pos.tvEntry, vwapMid: pos.vwapMid, vwapUpper: pos.vwapUpper, vwapLower: pos.vwapLower, vwapBandPct: pos.vwapBandPct, sessionHigh: pos.sessionHigh, sessionLow: pos.sessionLow, dayHigh: pos.dayHigh, dayLow: pos.dayLow, mt5Comment: pos.mt5Comment, openedAt: pos.openedAt, currentPrice: pos.currentPrice ?? null, livePnl: pos.livePnl ?? null, mt5Closed: pos.mt5Closed ?? false, ghostFinalized: pos.ghostFinalized ?? false, mt5CloseReason: pos.ghost?.mt5CloseReason ?? null,
+      ctx: p.ctx ?? null,
       ghost: g ? { maxRR: g.maxRR, currentRR: g.currentRR ?? null, peakRRPos: g.peakRRPos, peakRRNeg: g.peakRRNeg, rrMilestones: msToElapsed(g.rrMilestones, g.openedAt), mt5ClosedTP: g.mt5ClosedTP ?? false, phantomSLHit: g.phantomSLHit, mt5CloseReason: g.mt5CloseReason ?? null, timeToSLMin: g.timeToSLMin ?? null, slHitAt: g.slHitAt ?? null } : null,
     });
   }
@@ -1337,7 +1341,6 @@ function dashboardHTML() {
 </div>
 <div class="nav">
   <div class="ntab on" onclick="go('ov',this)">Overview</div>
-  <div class="ntab" onclick="go('sig',this)">Signals <span style="background:rgba(139,148,158,.15);color:#8b949e;border-radius:8px;padding:1px 5px;font-size:9px" id="nb-sig">0</span></div>
   <div class="ntab" onclick="go('gh',this)">Ghost Tracker <span style="background:rgba(188,140,255,.15);color:#bc8cff;border-radius:8px;padding:1px 5px;font-size:9px" id="nb-gh">0</span></div>
   <div class="ntab" onclick="go('perf',this)">Performance</div>
   <div class="ntab" onclick="go('hwm',this)">HWM</div>
@@ -1429,12 +1432,12 @@ function ghRows(pos,hist){
   const rows=[];
   const seen=new Set();
   (pos||[]).forEach(p=>{const g=p.ghost||{};seen.add(p.positionId);
-    rows.push({st:p.ghostFinalized?'fin':(p.mt5Closed?'ghost':'live'),positionId:p.positionId,dailyLabel:p.dailyLabel,symbol:p.symbol,assetType:p.assetType,mt5Comment:p.mt5Comment,direction:p.direction,session:p.session,vwapPosition:p.vwapPosition,entry:p.entry,sl:p.sl,tp:p.tp,lots:p.lots,tpRR:p.tpRR,rrNow:(g.currentRR!=null?g.currentRR:null),peakPos:g.peakRRPos||0,peakNeg:g.peakRRNeg!=null?-(g.peakRRNeg/100):null,ms:msNaarMinuten(g.rrMilestones, p.openedAt),live:true,openedAt:p.openedAt});});
+    rows.push({st:p.ghostFinalized?'fin':(p.mt5Closed?'ghost':'live'),positionId:p.positionId,dailyLabel:p.dailyLabel,symbol:p.symbol,assetType:p.assetType,mt5Comment:p.mt5Comment,direction:p.direction,session:p.session,vwapPosition:p.vwapPosition,entry:p.entry,sl:p.sl,tp:p.tp,lots:p.lots,tpRR:p.tpRR,rrNow:(g.currentRR!=null?g.currentRR:null),peakPos:g.peakRRPos||0,peakNeg:g.peakRRNeg!=null?-(g.peakRRNeg/100):null,ms:msNaarMinuten(g.rrMilestones, p.openedAt),live:true,openedAt:p.openedAt,vwapDistR:p.ctx?.vwapDistR,sessRangeR:p.ctx?.sessRangeR,posInSessRange:p.ctx?.posInSessRange,posInDayRange:p.ctx?.posInDayRange});});
   (hist||[]).forEach(h=>{if(seen.has(h.positionId))return;
-    rows.push({st:'fin',positionId:h.positionId,dailyLabel:h.dailyLabel,symbol:h.symbol,assetType:h.assetType,mt5Comment:h.mt5Comment,direction:h.direction,session:h.session,vwapPosition:h.vwapPosition,entry:h.entry,sl:h.sl,tp:h.tp,lots:h.lots,tpRR:null,rrNow:null,peakPos:h.peakRRPos||0,peakNeg:h.peakRRNeg!=null?h.peakRRNeg:null,ms:h.rrMilestones||{},live:false,openedAt:h.openedAt,timeToSL:h.timeToSLMin});});
+    rows.push({st:'fin',positionId:h.positionId,dailyLabel:h.dailyLabel,symbol:h.symbol,assetType:h.assetType,mt5Comment:h.mt5Comment,direction:h.direction,session:h.session,vwapPosition:h.vwapPosition,entry:h.entry,sl:h.sl,tp:h.tp,lots:h.lots,tpRR:null,rrNow:null,peakPos:h.peakRRPos||0,peakNeg:h.peakRRNeg!=null?h.peakRRNeg:null,ms:h.rrMilestones||{},live:false,openedAt:h.openedAt,timeToSL:h.timeToSLMin,vwapDistR:h.vwapDistR,sessRangeR:h.sessRangeR,posInSessRange:h.posInSessRange,posInDayRange:h.posInDayRange});});
   return rows;
 }
-function cellMin(v){if(v==null)return'';const n=Number(v);if(!isFinite(n))return'';return n>=60?(Math.floor(n/60)+'h'+String(Math.round(n%60)).padStart(2,'0')):(Math.round(n)+'m');}
+function cellMin(v){if(v==null)return'';const n=Number(v);if(!isFinite(n)||n<0)return'';return Math.round(n)+'m';}   // ALTIJD minuten, nooit uren
 async function loadGh(){
   const [pos,hist]=await Promise.all([api('/api/open-positions'),api('/api/ghost-history?limit=300')]);
   let rows=ghRows(pos,hist);
@@ -1472,13 +1475,14 @@ async function loadGh(){
   maxPos=Math.min(maxPos,6.0);
   const RR_POS=[];for(let v=0.1;v<=maxPos+1e-9;v=Math.round((v+0.1)*10)/10)RR_POS.push(Math.round(v*10)/10);
 
-  const head='<tr><th>Status</th><th>#</th><th>Symbol</th><th>Dir</th><th>VWAP</th><th>Session</th><th>RR Now</th><th>Peak+</th><th>Peak&minus;</th><th>Left</th><th>TP</th>'
+  const head='<tr><th>Status</th><th>#</th><th>Symbol</th><th>Dir</th><th>Session</th><th>RR Now</th><th>Peak+</th><th>Peak&minus;</th><th>Left</th>'
+    +'<th title="entry t.o.v. VWAP, in R">VWAP R</th><th title="breedte ochtendkanaal, in R">Chan R</th><th title="0=low 1=high">Pos Sess</th><th title="0=day low 1=day high">Pos Day</th>'
     +RR_NEG.map(v=>'<th style="color:#f85149">'+v.toFixed(1)+'</th>').join('')
     +RR_POS.map(v=>'<th style="color:#3fb950">+'+v.toFixed(1)+'</th>').join('')+'</tr>';
   if($('gh-head'))$('gh-head').innerHTML=head;
 
   const body=$('gh-body');if(!body)return;
-  if(!rows.length){body.innerHTML='<tr><td colspan="12" class="nd">No ghost trades yet — they appear once a signal is placed</td></tr>';return;}
+  if(!rows.length){body.innerHTML='<tr><td colspan="14" class="nd">No ghost trades yet — they appear once a signal is placed</td></tr>';return;}
   body.innerHTML=rows.map(r=>{
     const sb=r.st==='fin'?'<span class="bd" style="background:rgba(139,148,158,.15);color:#e6edf3;border:1px solid rgba(139,148,158,.4)">FINISHED</span>'
            :r.st==='ghost'?'<span class="bd" style="background:rgba(188,140,255,.15);color:#bc8cff;border:1px solid rgba(188,140,255,.3)">GHOST</span>'
@@ -1494,14 +1498,18 @@ async function loadGh(){
       const col=neg?'248,81,73':'63,185,80';
       return'<td style="background:rgba('+col+','+(fast*0.16).toFixed(2)+');color:rgba('+col+','+(0.45+fast*0.55).toFixed(2)+');font-size:9px">'+cellMin(mins)+'</td>';
     }).join('');
+    const nR=(v,d)=>v==null?'<span class="cd">--</span>':(Number(v)>=0?'+':'')+Number(v).toFixed(d??2);
     return'<tr><td>'+sb+'</td><td><span class="bd-k">'+(r.dailyLabel||'--')+'</span></td>'
       +'<td class="cw fw">'+(r.symbol||'--')+'</td><td>'+bdDir(r.direction)+'</td>'
-      +'<td class="cd" style="font-size:9px">'+(r.vwapPosition||'--').toUpperCase()+'</td><td>'+bdSess(r.session)+'</td>'
+      +'<td>'+bdSess(r.session)+'</td>'
       +'<td class="'+((r.rrNow||0)>=0?'cg':'cr')+' fw">'+(r.rrNow!=null?(r.rrNow>=0?'+':'')+Number(r.rrNow).toFixed(2)+'R':'--')+'</td>'
       +'<td class="cg fw">'+(pk>0?'+'+pk.toFixed(2)+'R':'--')+'</td>'
       +'<td class="cr">'+(r.peakNeg!=null?Number(r.peakNeg).toFixed(2)+'R':'--')+'</td>'
       +'<td class="'+(lft>0.3?'cy fw':'cd')+'">'+(lft>0?'+'+lft.toFixed(2)+'R':'--')+'</td>'
-      +'<td class="cd">'+fmt(r.tp,r.assetType==='index'?2:4)+'</td>'
+      +'<td class="cb">'+nR(r.vwapDistR)+'</td>'
+      +'<td class="cp">'+(r.sessRangeR!=null?Number(r.sessRangeR).toFixed(2):'<span class="cd">--</span>')+'</td>'
+      +'<td class="cd">'+(r.posInSessRange!=null?Number(r.posInSessRange).toFixed(2):'--')+'</td>'
+      +'<td class="cd">'+(r.posInDayRange!=null?Number(r.posInDayRange).toFixed(2):'--')+'</td>'
       +cells(RR_NEG,true)+cells(RR_POS,false)+'</tr>';
   }).join('');
 }
