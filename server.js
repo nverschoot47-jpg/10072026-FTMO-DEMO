@@ -499,6 +499,67 @@ function getCounterContext(symbol, direction, newTvEntry) {
   return out;
 }
 
+
+// ── GENORMALISEERDE CONTEXT-FEATURES ─────────────────────────────────────────
+// De webhook geeft FUTURES-prijzen (MGC1! ~4115.9). We handelen op de BROKER
+// (XAUUSD ~4120.5). Een rauwe prijs is als feature waardeloos -- hij verandert van
+// betekenis zodra de markt beweegt, en futures != broker.
+//
+// Het PERCENTAGE is de brug: ligt de VWAP 0,12% onder de futures-entry, dan ligt hij
+// ook 0,12% onder de broker-entry. Ongeacht het basisverschil tussen MGC1! en XAUUSD.
+//
+//   pct    = (x - tvEntry) / tvEntry        <- dimensieloos
+//   broker = execPrice * (1 + pct)          <- geprojecteerd op de broker
+//   in R   = (broker - execPrice) / slDist  <- in R, vergelijkbaar met alles
+//
+// Zo wordt elk webhook-getal een feature in R -- goud en nasdaq vergelijkbaar.
+function normaliseerContext(wh, tvEntry, execPrice, slDist) {
+  const out = {};
+  if (tvEntry == null || !(tvEntry > 0) || execPrice == null || !(slDist > 0)) return out;
+
+  // Futures-percentage -> R op de brokerprijs
+  const naarR = (x) => {
+    if (x == null || !Number.isFinite(x)) return null;
+    const pct = (x - tvEntry) / tvEntry;              // dimensieloos
+    const brokerX = execPrice * (1 + pct);            // geprojecteerd op de broker
+    return parseFloat(((brokerX - execPrice) / slDist).toFixed(3));   // in R
+  };
+  const pct = (x) => (x == null || !Number.isFinite(x))
+    ? null : parseFloat((((x - tvEntry) / tvEntry) * 100).toFixed(4));
+
+  out.futuresBrokerBasisPct = parseFloat((((execPrice - tvEntry) / tvEntry) * 100).toFixed(4));
+
+  // VWAP: positief = entry ligt BOVEN de vwap
+  const vwapR = naarR(wh.vwapMid);
+  out.vwapDistPct = wh.vwapMid != null ? -pct(wh.vwapMid) : null;
+  out.vwapDistR   = vwapR != null ? parseFloat((-vwapR).toFixed(3)) : null;
+  if (wh.vwapUpper != null && wh.vwapLower != null) {
+    const hi = naarR(wh.vwapUpper), lo = naarR(wh.vwapLower);
+    if (hi != null && lo != null) out.vwapBandPctR = parseFloat(Math.abs(hi - lo).toFixed(3));
+  }
+
+  // Sessie-range (het ochtendkanaal)
+  const sh = naarR(wh.sessionHigh), sl = naarR(wh.sessionLow);
+  if (sh != null) out.sessHighDistR = sh;                          // + = ruimte omhoog
+  if (sl != null) out.sessLowDistR  = parseFloat((-sl).toFixed(3)); // + = ruimte omlaag
+  if (sh != null && sl != null) {
+    out.sessRangeR = parseFloat((sh - sl).toFixed(3));             // hoe BREED is het kanaal
+    const span = wh.sessionHigh - wh.sessionLow;
+    if (span > 0) out.posInSessRange = parseFloat(((tvEntry - wh.sessionLow) / span).toFixed(3)); // 0=low, 1=high
+  }
+
+  // Dag-range
+  const dh = naarR(wh.dayHigh), dl = naarR(wh.dayLow);
+  if (dh != null) out.dayHighDistR = dh;
+  if (dl != null) out.dayLowDistR  = parseFloat((-dl).toFixed(3));
+  if (dh != null && dl != null) {
+    out.dayRangeR = parseFloat((dh - dl).toFixed(3));
+    const span = wh.dayHigh - wh.dayLow;
+    if (span > 0) out.posInDayRange = parseFloat(((tvEntry - wh.dayLow) / span).toFixed(3));
+  }
+  return out;
+}
+
 async function finalizeGhost(ghost) {
   const elapsedMilestones = msToElapsed(ghost.rrMilestones, ghost.openedAt);
   await db.saveGhostTrade({
@@ -1112,6 +1173,12 @@ app.post("/webhook", async (req, res) => {
   const dailyCount = await db.getNextDailyCount(dateStr).catch(() => 1);
   const dailyLabel = buildDailyLabel(null, dailyCount);
 
+  // Webhook-context omrekenen naar R op de BROKERPRIJS (zie normaliseerContext).
+  const ctx = normaliseerContext(wh, tvEntry, execPrice, slDist);
+  if (ctx.vwapDistR != null) {
+    console.log(`[Context] ${symbol} vwap=${ctx.vwapDistR}R | sessRange=${ctx.sessRangeR ?? "?"}R | posInSess=${ctx.posInSessRange ?? "?"} | posInDay=${ctx.posInDayRange ?? "?"}`);
+  }
+
   const sessMap = { ny: "NY", london: "LD", asia: "AS" };
   const vwapMap = { above: "ABV", below: "BLW", unknown: "UNK" };
   const mt5Comment = `${symbol.slice(0, 6)} ${direction === "buy" ? "B" : "S"}-${sessMap[session] ?? "NY"}-${vwapMap[vwapPos] ?? "UNK"} ${dailyLabel}`;
@@ -1172,7 +1239,7 @@ app.post("/webhook", async (req, res) => {
   openPositions.set(positionId, pos);
 
   await db.saveGhostState(pos.ghost);
-  await db.logSignal({ dailyLabel, symbol, assetType: symInfo.type, direction, session, vwapPosition: vwapPos, optimizerKey: optKey, tvEntry, slPct, vwapMid, vwapBandPct, ...wh, outcome: "PLACED", latencyMs: Date.now() - t0, positionId , ...counter });
+  await db.logSignal({ dailyLabel, symbol, assetType: symInfo.type, direction, session, vwapPosition: vwapPos, optimizerKey: optKey, tvEntry, slPct, vwapMid, vwapBandPct, ...wh, outcome: "PLACED", latencyMs: Date.now() - t0, positionId , ...counter, ...ctx });
 
   console.log(`[Placed] ${positionId} ${symbol} ${direction} lots=${lots} entry=${execPrice} sl=${slPrice} tp=${tpPrice} ${dailyLabel}`);
   markWebhookPlaced(rawSym||"", direction);
@@ -1327,11 +1394,27 @@ async function loadSig(){_sigAll=await api('/api/signal-log?limit=500')||[];if($
 function filterSig(f,el){_sigFilter=f;document.querySelectorAll('.seg').forEach(b=>b.classList.remove('on'));if(el)el.classList.add('on');renderSig();}
 function renderSig(){const data=_sigFilter==='placed'?_sigAll.filter(s=>s.outcome==='PLACED'):_sigFilter==='errors'?_sigAll.filter(s=>['ERROR','ORDER_NOT_CONFIRMED'].includes(s.outcome)):_sigAll;const body=$('sig-body');if(!body)return;if(!data.length){body.innerHTML='<tr><td colspan="10" class="nd">No signals yet</td></tr>';return;}body.innerHTML=data.map(s=>{let ob;if(s.outcome==='PLACED')ob='<span class="bd bd-placed">PLACED</span>';else if(s.outcome==='ERROR')ob='<span class="bd bd-err">ERROR</span>';else if(s.outcome==='ORDER_NOT_CONFIRMED')ob='<span class="bd bd-nopos">No Pos</span>';else ob='<span class="bd" style="background:rgba(240,136,62,.15);color:#f0883e;border:1px solid rgba(240,136,62,.3)">'+s.outcome+'</span>';return'<tr><td class="cd" style="font-size:9px">'+fmtTs(s.receivedAt)+'</td><td class="cw">'+(s.dailyLabel||'—')+'</td><td class="cw fw">'+(s.symbol||'--')+'</td><td>'+bdDir(s.direction)+'</td><td>'+bdSess(s.session)+'</td><td>'+bdVwap(s.vwapPosition||'unknown')+'</td><td class="cd">'+fmt(s.tvEntry,s.assetType==='index'?2:5)+'</td><td class="cd">'+(s.slPct?(s.slPct*100).toFixed(3)+'%':'--')+'</td><td>'+ob+'</td><td class="cd">'+(s.latencyMs!=null?s.latencyMs+'ms':'--')+'</td></tr>';}).join('');}
 const RR_NEG=[-1.0,-0.9,-0.8,-0.7,-0.6,-0.5,-0.4,-0.3,-0.2,-0.1];
+// LEVENDE ghosts (ghost_state) slaan rrMilestones op als RUWE TIMESTAMPS in ms --
+// dat is correct, de ghost loopt nog. FINISHED ghosts (ghost_trades) bevatten al
+// verstreken MINUTEN (msToElapsed() bij finalisatie).
+// Het dashboard moet die twee dus NIET gelijk behandelen: zonder deze omrekening
+// werden epoch-waarden (1783950000000) gerenderd als "4955555395619h18".
+function msNaarMinuten(ms, openedAt){
+  const t0 = openedAt ? new Date(openedAt).getTime() : null;
+  if (!t0 || !ms) return {};
+  const out = {};
+  for (const [k,v] of Object.entries(ms)) {
+    const ts = Number(v);
+    if (!isFinite(ts)) continue;
+    out[k] = Math.max(0, Math.round((ts - t0) / 60000));
+  }
+  return out;
+}
 function ghRows(pos,hist){
   const rows=[];
   const seen=new Set();
   (pos||[]).forEach(p=>{const g=p.ghost||{};seen.add(p.positionId);
-    rows.push({st:p.ghostFinalized?'fin':(p.mt5Closed?'ghost':'live'),positionId:p.positionId,dailyLabel:p.dailyLabel,symbol:p.symbol,assetType:p.assetType,mt5Comment:p.mt5Comment,direction:p.direction,session:p.session,vwapPosition:p.vwapPosition,entry:p.entry,sl:p.sl,tp:p.tp,lots:p.lots,tpRR:p.tpRR,rrNow:(g.currentRR!=null?g.currentRR:null),peakPos:g.peakRRPos||0,peakNeg:g.peakRRNeg!=null?-(g.peakRRNeg/100):null,ms:g.rrMilestones||{},live:true,openedAt:p.openedAt});});
+    rows.push({st:p.ghostFinalized?'fin':(p.mt5Closed?'ghost':'live'),positionId:p.positionId,dailyLabel:p.dailyLabel,symbol:p.symbol,assetType:p.assetType,mt5Comment:p.mt5Comment,direction:p.direction,session:p.session,vwapPosition:p.vwapPosition,entry:p.entry,sl:p.sl,tp:p.tp,lots:p.lots,tpRR:p.tpRR,rrNow:(g.currentRR!=null?g.currentRR:null),peakPos:g.peakRRPos||0,peakNeg:g.peakRRNeg!=null?-(g.peakRRNeg/100):null,ms:msNaarMinuten(g.rrMilestones, p.openedAt),live:true,openedAt:p.openedAt});});
   (hist||[]).forEach(h=>{if(seen.has(h.positionId))return;
     rows.push({st:'fin',positionId:h.positionId,dailyLabel:h.dailyLabel,symbol:h.symbol,assetType:h.assetType,mt5Comment:h.mt5Comment,direction:h.direction,session:h.session,vwapPosition:h.vwapPosition,entry:h.entry,sl:h.sl,tp:h.tp,lots:h.lots,tpRR:null,rrNow:null,peakPos:h.peakRRPos||0,peakNeg:h.peakRRNeg!=null?h.peakRRNeg:null,ms:h.rrMilestones||{},live:false,openedAt:h.openedAt,timeToSL:h.timeToSLMin});});
   return rows;
