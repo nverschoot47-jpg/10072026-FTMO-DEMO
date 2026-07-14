@@ -822,7 +822,7 @@ async function updateHwm(dateStr, balance, equity, openPnl) {
   try {
     await pool.query(`
       INSERT INTO hwm_daily (date_str, peak_open_pnl, trough_open_pnl, peak_equity, peak_balance, start_balance, updated_at)
-      VALUES ($1,$2,$2,$3,$4,$4,NOW())
+      VALUES ($1, $2::numeric, $2::numeric, $3::numeric, $4::numeric, $4::numeric, NOW())
       ON CONFLICT (date_str) DO UPDATE SET
         peak_open_pnl   = GREATEST(hwm_daily.peak_open_pnl,   EXCLUDED.peak_open_pnl),
         trough_open_pnl = LEAST   (hwm_daily.trough_open_pnl, EXCLUDED.trough_open_pnl),
@@ -833,10 +833,10 @@ async function updateHwm(dateStr, balance, equity, openPnl) {
 
     await pool.query(`
       UPDATE hwm_alltime SET
-        peak_balance  = GREATEST(COALESCE(peak_balance, 0),  COALESCE($1, 0)),
-        peak_open_pnl = GREATEST(COALESCE(peak_open_pnl, 0), COALESCE($3, 0)),
-        achieved_at   = CASE WHEN COALESCE($2,0) > COALESCE(peak_equity, -1e18) THEN NOW() ELSE achieved_at END,
-        peak_equity   = GREATEST(COALESCE(peak_equity, 0),   COALESCE($2, 0)),
+        peak_balance  = GREATEST(COALESCE(peak_balance, 0),  COALESCE($1::numeric, 0)),
+        peak_open_pnl = GREATEST(COALESCE(peak_open_pnl, 0), COALESCE($3::numeric, 0)),
+        achieved_at   = CASE WHEN COALESCE($2::numeric, 0) > COALESCE(peak_equity, -1e18) THEN NOW() ELSE achieved_at END,
+        peak_equity   = GREATEST(COALESCE(peak_equity, 0),   COALESCE($2::numeric, 0)),
         updated_at    = NOW()
       WHERE id = 1
     `, [bal, eq, pnl]);
