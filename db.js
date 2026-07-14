@@ -678,12 +678,14 @@ async function saveGhostTrade(g) {
         session_high, session_low, day_high, day_low, tv_entry, mt5_comment,
         peak_rr_pos, rr_milestones, time_to_sl_min,
         mt5_close_reason, opened_at, closed_at, peak_rr_neg,
-        finalize_reason, data_complete, milestones_estimated, blackout_min
+        finalize_reason, data_complete, milestones_estimated, blackout_min,
+        vwap_dist_r, sess_range_r, sess_high_dist_r, sess_low_dist_r,
+        pos_in_sess_range, day_range_r, pos_in_day_range
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,
         $9,$10,$11,$12,$13,$14,$15,
         $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,
-        $26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36
+        $26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43
       )
       ON CONFLICT (position_id) DO UPDATE SET
         peak_rr_pos     = EXCLUDED.peak_rr_pos,
@@ -714,6 +716,10 @@ async function saveGhostTrade(g) {
       g.dataComplete !== false,
       g.estimatedCount ?? 0,
       g.blackoutMin ?? 0,
+      g.ctx?.vwapDistR ?? null, g.ctx?.sessRangeR ?? null,
+      g.ctx?.sessHighDistR ?? null, g.ctx?.sessLowDistR ?? null,
+      g.ctx?.posInSessRange ?? null, g.ctx?.dayRangeR ?? null,
+      g.ctx?.posInDayRange ?? null,
     ]);
   } catch (e) {
     if (e.message.includes('ON CONFLICT') || e.message.includes('constraint')) {
@@ -774,7 +780,15 @@ async function loadGhostTrades(from = null, to = null, limit = 300) {
         time_to_sl_min AS "timeToSLMin",
         mt5_close_reason AS "mt5CloseReason",
         mt5_comment AS "mt5Comment",
-        opened_at AS "openedAt", COALESCE(closed_at, created_at) AS "closedAt"
+        opened_at AS "openedAt", COALESCE(closed_at, created_at) AS "closedAt",
+        -- genormaliseerde marktcontext (staat in signal_log, hier bijgevoegd)
+        CAST(vwap_dist_r AS FLOAT)       AS "vwapDistR",
+        CAST(sess_range_r AS FLOAT)      AS "sessRangeR",
+        CAST(sess_high_dist_r AS FLOAT)  AS "sessHighDistR",
+        CAST(sess_low_dist_r AS FLOAT)   AS "sessLowDistR",
+        CAST(pos_in_sess_range AS FLOAT) AS "posInSessRange",
+        CAST(day_range_r AS FLOAT)       AS "dayRangeR",
+        CAST(pos_in_day_range AS FLOAT)  AS "posInDayRange"
       FROM ghost_trades
       ${where}
       ORDER BY opened_at DESC NULLS LAST
