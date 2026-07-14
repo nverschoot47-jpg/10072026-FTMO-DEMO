@@ -248,6 +248,7 @@ function initGhost(pos) {
     peakRRPos:     0,
     peakRRNeg:     0,
     rrMilestones:  {},
+    ctx:           pos.ctx ?? null,   // genormaliseerde marktcontext -> gaat mee naar ghost_trades
     mt5ClosedTP:   false,
     mt5CloseAt:    null,
     mt5CloseReason: null,
@@ -1273,6 +1274,7 @@ app.post("/webhook", async (req, res) => {
     riskPct: DEFAULT_RISK_PCT, riskEur, slPct, slDist,
     tvEntry, executionPrice: execPrice, slippage,
     vwapMid, vwapBandPct, ...wh,
+    ctx,                                   // genormaliseerde features (vwapDistR, sessRangeR, posInSess/Day)
     mt5Comment, openedAt: new Date().toISOString(),
     currentPrice: execPrice, livePnl: 0, mt5Closed: false,
   };
