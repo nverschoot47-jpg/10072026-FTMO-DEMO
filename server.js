@@ -1272,7 +1272,7 @@ app.get("/api/open-positions", (req, res) => {
   for (const [id, pos] of openPositions) {
     const g = pos.ghost;
     out.push({ positionId: id, dailyLabel: pos.dailyLabel, symbol: pos.symbol, assetType: pos.assetType, direction: pos.direction, session: pos.session, vwapPosition: pos.vwapPosition, optimizerKey: pos.optimizerKey, entry: pos.entry, sl: pos.sl, tp: pos.tp, lots: pos.lots, riskEur: pos.riskEur, slPct: pos.slPct, slDist: pos.slDist, tvEntry: pos.tvEntry, vwapMid: pos.vwapMid, vwapUpper: pos.vwapUpper, vwapLower: pos.vwapLower, vwapBandPct: pos.vwapBandPct, sessionHigh: pos.sessionHigh, sessionLow: pos.sessionLow, dayHigh: pos.dayHigh, dayLow: pos.dayLow, mt5Comment: pos.mt5Comment, openedAt: pos.openedAt, currentPrice: pos.currentPrice ?? null, livePnl: pos.livePnl ?? null, mt5Closed: pos.mt5Closed ?? false, ghostFinalized: pos.ghostFinalized ?? false, mt5CloseReason: pos.ghost?.mt5CloseReason ?? null,
-      ctx: p.ctx ?? null,
+      ctx: pos.ctx ?? null,
       ghost: g ? { maxRR: g.maxRR, currentRR: g.currentRR ?? null, peakRRPos: g.peakRRPos, peakRRNeg: g.peakRRNeg, rrMilestones: msToElapsed(g.rrMilestones, g.openedAt), mt5ClosedTP: g.mt5ClosedTP ?? false, phantomSLHit: g.phantomSLHit, mt5CloseReason: g.mt5CloseReason ?? null, timeToSLMin: g.timeToSLMin ?? null, slHitAt: g.slHitAt ?? null } : null,
     });
   }
@@ -1412,27 +1412,14 @@ async function loadSig(){_sigAll=await api('/api/signal-log?limit=500')||[];if($
 function filterSig(f,el){_sigFilter=f;document.querySelectorAll('.seg').forEach(b=>b.classList.remove('on'));if(el)el.classList.add('on');renderSig();}
 function renderSig(){const data=_sigFilter==='placed'?_sigAll.filter(s=>s.outcome==='PLACED'):_sigFilter==='errors'?_sigAll.filter(s=>['ERROR','ORDER_NOT_CONFIRMED'].includes(s.outcome)):_sigAll;const body=$('sig-body');if(!body)return;if(!data.length){body.innerHTML='<tr><td colspan="10" class="nd">No signals yet</td></tr>';return;}body.innerHTML=data.map(s=>{let ob;if(s.outcome==='PLACED')ob='<span class="bd bd-placed">PLACED</span>';else if(s.outcome==='ERROR')ob='<span class="bd bd-err">ERROR</span>';else if(s.outcome==='ORDER_NOT_CONFIRMED')ob='<span class="bd bd-nopos">No Pos</span>';else ob='<span class="bd" style="background:rgba(240,136,62,.15);color:#f0883e;border:1px solid rgba(240,136,62,.3)">'+s.outcome+'</span>';return'<tr><td class="cd" style="font-size:9px">'+fmtTs(s.receivedAt)+'</td><td class="cw">'+(s.dailyLabel||'—')+'</td><td class="cw fw">'+(s.symbol||'--')+'</td><td>'+bdDir(s.direction)+'</td><td>'+bdSess(s.session)+'</td><td>'+bdVwap(s.vwapPosition||'unknown')+'</td><td class="cd">'+fmt(s.tvEntry,s.assetType==='index'?2:5)+'</td><td class="cd">'+(s.slPct?(s.slPct*100).toFixed(3)+'%':'--')+'</td><td>'+ob+'</td><td class="cd">'+(s.latencyMs!=null?s.latencyMs+'ms':'--')+'</td></tr>';}).join('');}
 const RR_NEG=[-1.0,-0.9,-0.8,-0.7,-0.6,-0.5,-0.4,-0.3,-0.2,-0.1];
-// LEVENDE ghosts (ghost_state) slaan rrMilestones op als RUWE TIMESTAMPS in ms --
-// dat is correct, de ghost loopt nog. FINISHED ghosts (ghost_trades) bevatten al
-// verstreken MINUTEN (msToElapsed() bij finalisatie).
-// Het dashboard moet die twee dus NIET gelijk behandelen: zonder deze omrekening
-// werden epoch-waarden (1783950000000) gerenderd als "4955555395619h18".
-function msNaarMinuten(ms, openedAt){
-  const t0 = openedAt ? new Date(openedAt).getTime() : null;
-  if (!t0 || !ms) return {};
-  const out = {};
-  for (const [k,v] of Object.entries(ms)) {
-    const ts = Number(v);
-    if (!isFinite(ts)) continue;
-    out[k] = Math.max(0, Math.round((ts - t0) / 60000));
-  }
-  return out;
-}
+// LET OP: /api/open-positions past AL msToElapsed() toe, dus rrMilestones bevat
+// hier AL verstreken MINUTEN -- voor zowel live als finished ghosts. Hier NIET
+// nogmaals converteren: dat gaf eerder epoch-onzin als "825430419h36".
 function ghRows(pos,hist){
   const rows=[];
   const seen=new Set();
   (pos||[]).forEach(p=>{const g=p.ghost||{};seen.add(p.positionId);
-    rows.push({st:p.ghostFinalized?'fin':(p.mt5Closed?'ghost':'live'),positionId:p.positionId,dailyLabel:p.dailyLabel,symbol:p.symbol,assetType:p.assetType,mt5Comment:p.mt5Comment,direction:p.direction,session:p.session,vwapPosition:p.vwapPosition,entry:p.entry,sl:p.sl,tp:p.tp,lots:p.lots,tpRR:p.tpRR,rrNow:(g.currentRR!=null?g.currentRR:null),peakPos:g.peakRRPos||0,peakNeg:g.peakRRNeg!=null?-(g.peakRRNeg/100):null,ms:msNaarMinuten(g.rrMilestones, p.openedAt),live:true,openedAt:p.openedAt,vwapDistR:p.ctx?.vwapDistR,sessRangeR:p.ctx?.sessRangeR,posInSessRange:p.ctx?.posInSessRange,posInDayRange:p.ctx?.posInDayRange});});
+    rows.push({st:p.ghostFinalized?'fin':(p.mt5Closed?'ghost':'live'),positionId:p.positionId,dailyLabel:p.dailyLabel,symbol:p.symbol,assetType:p.assetType,mt5Comment:p.mt5Comment,direction:p.direction,session:p.session,vwapPosition:p.vwapPosition,entry:p.entry,sl:p.sl,tp:p.tp,lots:p.lots,tpRR:p.tpRR,rrNow:(g.currentRR!=null?g.currentRR:null),peakPos:g.peakRRPos||0,peakNeg:g.peakRRNeg!=null?-(g.peakRRNeg/100):null,ms:(g.rrMilestones||{}),live:true,openedAt:p.openedAt,vwapDistR:p.ctx?.vwapDistR,sessRangeR:p.ctx?.sessRangeR,posInSessRange:p.ctx?.posInSessRange,posInDayRange:p.ctx?.posInDayRange});});
   (hist||[]).forEach(h=>{if(seen.has(h.positionId))return;
     rows.push({st:'fin',positionId:h.positionId,dailyLabel:h.dailyLabel,symbol:h.symbol,assetType:h.assetType,mt5Comment:h.mt5Comment,direction:h.direction,session:h.session,vwapPosition:h.vwapPosition,entry:h.entry,sl:h.sl,tp:h.tp,lots:h.lots,tpRR:null,rrNow:null,peakPos:h.peakRRPos||0,peakNeg:h.peakRRNeg!=null?h.peakRRNeg:null,ms:h.rrMilestones||{},live:false,openedAt:h.openedAt,timeToSL:h.timeToSLMin,vwapDistR:h.vwapDistR,sessRangeR:h.sessRangeR,posInSessRange:h.posInSessRange,posInDayRange:h.posInDayRange});});
   return rows;
