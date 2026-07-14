@@ -16,6 +16,7 @@
 --  Nog steeds GEEN valuta. risk_eur en lots komen hier niet in voor.
 -- ═══════════════════════════════════════════════════════════════════════════
 
+
 CREATE OR REPLACE VIEW v_ghost_clean AS
 SELECT
   g.position_id,
