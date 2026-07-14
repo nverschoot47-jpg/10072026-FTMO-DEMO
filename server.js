@@ -69,6 +69,8 @@ let latestCurrency = "USD";
 let _acctCache    = null;
 let _acctCacheTs  = 0;
 let _syncRunning  = false;
+let _emptySyncs   = 0;              // opeenvolgende syncs waarin MetaAPI 0 posities meldde
+const MAX_EMPTY_SYNCS = 30;         // 30 x 10s = 5 min glitch-tolerantie
 let _lastEquitySave = 0;
 
 // ── Express: start immediately so Railway health check passes ────
