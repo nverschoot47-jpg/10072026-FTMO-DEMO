@@ -517,45 +517,60 @@ function normaliseerContext(wh, tvEntry, execPrice, slDist) {
   const out = {};
   if (tvEntry == null || !(tvEntry > 0) || execPrice == null || !(slDist > 0)) return out;
 
-  // Futures-percentage -> R op de brokerprijs
-  const naarR = (x) => {
-    if (x == null || !Number.isFinite(x)) return null;
-    const pct = (x - tvEntry) / tvEntry;              // dimensieloos
-    const brokerX = execPrice * (1 + pct);            // geprojecteerd op de broker
-    return parseFloat(((brokerX - execPrice) / slDist).toFixed(3));   // in R
+  const dec = (x, n) => parseFloat(x.toFixed(n));
+
+  // pct: hoeveel % ligt dit niveau boven (+) of onder (-) de entry, op de FUTURES-chart
+  const pct = (x) => (x == null || !Number.isFinite(x)) ? null : dec(((x - tvEntry) / tvEntry) * 100, 4);
+  // brokerprijs: datzelfde percentage geprojecteerd op de ECHTE fill (ask bij buy, bid bij sell)
+  const brk = (x) => (x == null || !Number.isFinite(x)) ? null : dec(execPrice * (1 + (x - tvEntry) / tvEntry), 5);
+  // in R: afstand vanaf de fill, gedeeld door de SL-afstand
+  const inR = (x) => {
+    const b = brk(x);
+    return b == null ? null : dec((b - execPrice) / slDist, 3);
   };
-  const pct = (x) => (x == null || !Number.isFinite(x))
-    ? null : parseFloat((((x - tvEntry) / tvEntry) * 100).toFixed(4));
 
-  out.futuresBrokerBasisPct = parseFloat((((execPrice - tvEntry) / tvEntry) * 100).toFixed(4));
+  // Het basisverschil futures <-> broker, vastgelegd zodat je het kunt controleren
+  out.futuresBrokerBasisPct = dec(((execPrice - tvEntry) / tvEntry) * 100, 4);
 
-  // VWAP: positief = entry ligt BOVEN de vwap
-  const vwapR = naarR(wh.vwapMid);
-  out.vwapDistPct = wh.vwapMid != null ? -pct(wh.vwapMid) : null;
-  out.vwapDistR   = vwapR != null ? parseFloat((-vwapR).toFixed(3)) : null;
+  // ── VWAP ──  (dist = entry t.o.v. vwap, dus omgekeerd teken)
+  out.vwapDistPct = wh.vwapMid != null ? dec(-pct(wh.vwapMid), 4) : null;
+  out.vwapDistR   = wh.vwapMid != null ? dec(-inR(wh.vwapMid), 3) : null;
+  out.brokerVwap      = brk(wh.vwapMid);
+  out.brokerVwapUpper = brk(wh.vwapUpper);
+  out.brokerVwapLower = brk(wh.vwapLower);
   if (wh.vwapUpper != null && wh.vwapLower != null) {
-    const hi = naarR(wh.vwapUpper), lo = naarR(wh.vwapLower);
-    if (hi != null && lo != null) out.vwapBandPctR = parseFloat(Math.abs(hi - lo).toFixed(3));
+    const hi = inR(wh.vwapUpper), lo = inR(wh.vwapLower);
+    if (hi != null && lo != null) out.vwapBandPctR = dec(Math.abs(hi - lo), 3);
   }
 
-  // Sessie-range (het ochtendkanaal)
-  const sh = naarR(wh.sessionHigh), sl = naarR(wh.sessionLow);
-  if (sh != null) out.sessHighDistR = sh;                          // + = ruimte omhoog
-  if (sl != null) out.sessLowDistR  = parseFloat((-sl).toFixed(3)); // + = ruimte omlaag
+  // ── Sessie-range (het ochtendkanaal) ──
+  out.sessHighPct    = pct(wh.sessionHigh);
+  out.sessLowPct     = pct(wh.sessionLow);
+  out.brokerSessHigh = brk(wh.sessionHigh);
+  out.brokerSessLow  = brk(wh.sessionLow);
+  const sh = inR(wh.sessionHigh), sl = inR(wh.sessionLow);
+  if (sh != null) out.sessHighDistR = sh;                 // + = ruimte omhoog
+  if (sl != null) out.sessLowDistR  = dec(-sl, 3);        // + = ruimte omlaag
   if (sh != null && sl != null) {
-    out.sessRangeR = parseFloat((sh - sl).toFixed(3));             // hoe BREED is het kanaal
+    out.sessRangeR   = dec(sh - sl, 3);                   // HOE BREED is het kanaal, in R
+    out.sessRangePct = dec((out.sessHighPct - out.sessLowPct), 4);
     const span = wh.sessionHigh - wh.sessionLow;
-    if (span > 0) out.posInSessRange = parseFloat(((tvEntry - wh.sessionLow) / span).toFixed(3)); // 0=low, 1=high
+    if (span > 0) out.posInSessRange = dec((tvEntry - wh.sessionLow) / span, 3);  // 0=low, 1=high
   }
 
-  // Dag-range
-  const dh = naarR(wh.dayHigh), dl = naarR(wh.dayLow);
+  // ── Dag-range ──
+  out.dayHighPct    = pct(wh.dayHigh);
+  out.dayLowPct     = pct(wh.dayLow);
+  out.brokerDayHigh = brk(wh.dayHigh);
+  out.brokerDayLow  = brk(wh.dayLow);
+  const dh = inR(wh.dayHigh), dl = inR(wh.dayLow);
   if (dh != null) out.dayHighDistR = dh;
-  if (dl != null) out.dayLowDistR  = parseFloat((-dl).toFixed(3));
+  if (dl != null) out.dayLowDistR  = dec(-dl, 3);
   if (dh != null && dl != null) {
-    out.dayRangeR = parseFloat((dh - dl).toFixed(3));
+    out.dayRangeR   = dec(dh - dl, 3);
+    out.dayRangePct = dec((out.dayHighPct - out.dayLowPct), 4);
     const span = wh.dayHigh - wh.dayLow;
-    if (span > 0) out.posInDayRange = parseFloat(((tvEntry - wh.dayLow) / span).toFixed(3));
+    if (span > 0) out.posInDayRange = dec((tvEntry - wh.dayLow) / span, 3);
   }
   return out;
 }
