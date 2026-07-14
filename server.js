@@ -282,7 +282,7 @@ function _stampCrossings(ghost, sign, from, to, max, now, gapStart, isBlackout) 
     if (to < v - 1e-9) continue;                       // nog niet bereikt
 
     if (!isBlackout || v <= from + 1e-9) {
-      ghost.rrMilestones[key] = now;                   // ECHT waargenomen
+      if (now >= _MS_MIN && now <= _MS_MAX) ghost.rrMilestones[key] = now;   // ECHT waargenomen
       continue;
     }
 
@@ -359,8 +359,31 @@ function updateGhost(ghost, currentPrice) {
 //     NUMBERS, so you can query straight:
 //         (rr_milestones->>'+1.5')::numeric  AS minutes_to_1_5R
 //     Formatting is the dashboard's job, not the database's.
+
+// ── SANITIZER: gooi onmogelijke milestone-waarden weg ────────────────────────
+// ghost_state slaat rrMilestones op als RUWE EPOCH-MS. Door een eerdere dubbele-
+// conversie-bug zijn daar onmogelijke waarden in beland (bv. 1.78e19), en die zijn
+// MEE OPGESLAGEN. Bij elke herstart kwamen ze weer terug -- de rotzooi was persistent.
+//
+// Een geldige stempel ligt tussen 2020 en 2035. Alles daarbuiten is corrupt en gaat weg.
+// Beter een ONTBREKENDE cel dan een verzonnen cel.
+const _MS_MIN = Date.parse("2020-01-01T00:00:00Z");
+const _MS_MAX = Date.parse("2035-01-01T00:00:00Z");
+function saneerMilestones(ms) {
+  if (!ms || typeof ms !== "object") return {};
+  const out = {};
+  let weg = 0;
+  for (const [k, v] of Object.entries(ms)) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n >= _MS_MIN && n <= _MS_MAX) out[k] = n;
+    else weg++;
+  }
+  if (weg) console.warn(`[Ghost] ${weg} corrupte milestone-waarde(n) weggegooid`);
+  return out;
+}
+
 function msToElapsed(rrMilestones, openedAt) {
-  const ms = rrMilestones ?? {};
+  const ms = saneerMilestones(rrMilestones);
   let openedTs = openedAt ? new Date(openedAt).getTime() : null;
   if (!openedTs || !Number.isFinite(openedTs)) {
     // Fall back to the earliest stamp we have — never emit absolute epoch values.
@@ -1528,7 +1551,7 @@ async function initBackground() {
     for (const g of states) {
       if (!g.positionId || !g.entry || !g.sl) continue;
       const pos = { positionId: g.positionId, dailyLabel: g.dailyLabel, symbol: g.symbol, assetType: g.assetType, direction: g.direction, session: g.session, vwapPosition: g.vwapPosition, optimizerKey: g.optimizerKey, entry: g.entry, sl: g.sl, tp: g.tp, lots: g.lots, riskEur: g.riskEur, slPct: g.slPct, slDist: g.slDist, vwapMid: g.vwapMid, vwapUpper: g.vwapUpper, vwapLower: g.vwapLower, vwapBandPct: g.vwapBandPct, sessionHigh: g.sessionHigh, sessionLow: g.sessionLow, dayHigh: g.dayHigh, dayLow: g.dayLow, tvEntry: g.tvEntry, mt5Comment: g.mt5Comment, openedAt: g.openedAt, mt5Closed: g.mt5ClosedTP ?? false, currentPrice: g.entry, livePnl: 0,
-        ghost: { positionId: g.positionId, dailyLabel: g.dailyLabel, optimizerKey: g.optimizerKey, symbol: g.symbol, assetType: g.assetType, direction: g.direction, session: g.session, vwapPosition: g.vwapPosition, entry: g.entry, sl: g.sl, tp: g.tp, lots: g.lots, riskEur: g.riskEur, slPct: g.slPct, slDist: g.slDist, vwapMid: g.vwapMid, vwapUpper: g.vwapUpper, vwapLower: g.vwapLower, vwapBandPct: g.vwapBandPct, sessionHigh: g.sessionHigh, sessionLow: g.sessionLow, dayHigh: g.dayHigh, dayLow: g.dayLow, tvEntry: g.tvEntry, mt5Comment: g.mt5Comment, openedAt: g.openedAt, maxRR: g.maxRR ?? 0, peakRRPos: g.peakRRPos ?? 0, peakRRNeg: g.peakRRNeg ?? 0, currentRR: g.currentRR ?? null, lastPriceAt: g.lastPriceAt ?? null, estimatedCount: g.estimatedCount ?? 0, blackoutMin: g.blackoutMin ?? 0, rrMilestones: g.rrMilestones ?? {}, mt5ClosedTP: g.mt5ClosedTP ?? false, mt5CloseAt: g.mt5CloseAt ?? null, mt5CloseReason: g.mt5CloseReason ?? null, phantomSLHit: g.phantomSLHit ?? false, slHitAt: g.slHitAt ?? null, timeToSLMin: g.timeToSLMin ?? null },
+        ghost: { positionId: g.positionId, dailyLabel: g.dailyLabel, optimizerKey: g.optimizerKey, symbol: g.symbol, assetType: g.assetType, direction: g.direction, session: g.session, vwapPosition: g.vwapPosition, entry: g.entry, sl: g.sl, tp: g.tp, lots: g.lots, riskEur: g.riskEur, slPct: g.slPct, slDist: g.slDist, vwapMid: g.vwapMid, vwapUpper: g.vwapUpper, vwapLower: g.vwapLower, vwapBandPct: g.vwapBandPct, sessionHigh: g.sessionHigh, sessionLow: g.sessionLow, dayHigh: g.dayHigh, dayLow: g.dayLow, tvEntry: g.tvEntry, mt5Comment: g.mt5Comment, openedAt: g.openedAt, maxRR: g.maxRR ?? 0, peakRRPos: g.peakRRPos ?? 0, peakRRNeg: g.peakRRNeg ?? 0, currentRR: g.currentRR ?? null, lastPriceAt: g.lastPriceAt ?? null, estimatedCount: g.estimatedCount ?? 0, blackoutMin: g.blackoutMin ?? 0, rrMilestones: saneerMilestones(g.rrMilestones), mt5ClosedTP: g.mt5ClosedTP ?? false, mt5CloseAt: g.mt5CloseAt ?? null, mt5CloseReason: g.mt5CloseReason ?? null, phantomSLHit: g.phantomSLHit ?? false, slHitAt: g.slHitAt ?? null, timeToSLMin: g.timeToSLMin ?? null },
       };
       openPositions.set(g.positionId, pos);
     }
