@@ -288,13 +288,6 @@ async function initDB() {
       ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS mt5_comment     TEXT;
       ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS mt5_close_at    TIMESTAMPTZ;
       ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS time_to_sl_min  INTEGER;
-      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS vwap_dist_r       NUMERIC;
-      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS sess_range_r      NUMERIC;
-      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS sess_high_dist_r  NUMERIC;
-      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS sess_low_dist_r   NUMERIC;
-      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS pos_in_sess_range NUMERIC;
-      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS day_range_r       NUMERIC;
-      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS pos_in_day_range  NUMERIC;
     `);
     await client.query(`
       ALTER TABLE ghost_trades   ADD COLUMN IF NOT EXISTS optimizer_key   TEXT;
@@ -316,6 +309,23 @@ async function initDB() {
     await safeRun(client, `ALTER TABLE ghost_trades ALTER COLUMN phantom_sl_hit DROP NOT NULL`, "drop phantom_sl_hit NOT NULL");
     // Fix: tp nullable in ghost_state
     await safeRun(client, `ALTER TABLE ghost_state ALTER COLUMN tp DROP NOT NULL`, "drop ghost_state.tp NOT NULL");
+
+    // Context columns (VWAP R / range R) for ghost_state — added one at a time via
+    // safeRun so that a failure on ANY single one can never roll back the whole
+    // Step-1/Step-2 transaction above. Before this fix they lived inside the shared
+    // ALTER block: one bad statement there would silently roll back everything,
+    // leave the columns missing, and make every saveGhostState()/saveGhostTrade()
+    // call fail quietly from that boot onward — exactly the "not saved after a
+    // push" symptom. Each of these is now independently retried on every boot
+    // until it succeeds, and can never block the rest of the schema from applying.
+    await safeRun(client, `ALTER TABLE ghost_state ADD COLUMN IF NOT EXISTS vwap_dist_r       NUMERIC`, "ghost_state.vwap_dist_r");
+    await safeRun(client, `ALTER TABLE ghost_state ADD COLUMN IF NOT EXISTS sess_range_r      NUMERIC`, "ghost_state.sess_range_r");
+    await safeRun(client, `ALTER TABLE ghost_state ADD COLUMN IF NOT EXISTS sess_high_dist_r  NUMERIC`, "ghost_state.sess_high_dist_r");
+    await safeRun(client, `ALTER TABLE ghost_state ADD COLUMN IF NOT EXISTS sess_low_dist_r   NUMERIC`, "ghost_state.sess_low_dist_r");
+    await safeRun(client, `ALTER TABLE ghost_state ADD COLUMN IF NOT EXISTS pos_in_sess_range NUMERIC`, "ghost_state.pos_in_sess_range");
+    await safeRun(client, `ALTER TABLE ghost_state ADD COLUMN IF NOT EXISTS day_range_r       NUMERIC`, "ghost_state.day_range_r");
+    await safeRun(client, `ALTER TABLE ghost_state ADD COLUMN IF NOT EXISTS pos_in_day_range  NUMERIC`, "ghost_state.pos_in_day_range");
+
     // Fix: UNIQUE constraint on ghost_trades.position_id (required for ON CONFLICT)
     await safeRun(client, `
       DO $d$ BEGIN
@@ -571,6 +581,23 @@ async function loadClosedTrades(limit = 200) {
 }
 
 // ── Ghost state ────────────────────────────────────────────────────
+const _ghostStateBaseParams = (g) => [
+  g.positionId, g.dailyLabel,
+  g.optimizerKey, g.symbol, g.assetType, g.direction, g.session, g.vwapPosition,
+  g.entry, g.sl, g.tp ?? null, g.lots ?? null, g.riskEur ?? null,
+  g.slPct ?? null, g.slDist ?? null,
+  g.vwapMid ?? null, g.vwapUpper ?? null, g.vwapLower ?? null, g.vwapBandPct ?? null,
+  g.sessionHigh ?? null, g.sessionLow ?? null, g.dayHigh ?? null, g.dayLow ?? null,
+  g.tvEntry ?? null, g.mt5Comment ?? null,
+  g.maxRR ?? 0, g.peakRRPos ?? 0, g.peakRRNeg ?? 0,
+  JSON.stringify(g.rrMilestones ?? {}),
+  g.mt5ClosedTP ?? false, g.mt5CloseAt ?? null,
+  g.phantomSLHit ?? false, g.slHitAt ?? null, g.timeToSLMin ?? null,
+  g.openedAt ?? null,
+  g.lastPriceAt ?? null, g.estimatedCount ?? 0, g.blackoutMin ?? 0,
+  g.mt5CloseReason ?? null, g.currentRR ?? null,
+];
+
 async function saveGhostState(g) {
   if (!DB_ENABLED) return;
   try {
@@ -620,75 +647,114 @@ async function saveGhostState(g) {
         lots            = COALESCE(EXCLUDED.lots, ghost_state.lots),
         updated_at      = NOW()
     `, [
-      g.positionId, g.dailyLabel,
-      g.optimizerKey, g.symbol, g.assetType, g.direction, g.session, g.vwapPosition,
-      g.entry, g.sl, g.tp ?? null, g.lots ?? null, g.riskEur ?? null,
-      g.slPct ?? null, g.slDist ?? null,
-      g.vwapMid ?? null, g.vwapUpper ?? null, g.vwapLower ?? null, g.vwapBandPct ?? null,
-      g.sessionHigh ?? null, g.sessionLow ?? null, g.dayHigh ?? null, g.dayLow ?? null,
-      g.tvEntry ?? null, g.mt5Comment ?? null,
-      g.maxRR ?? 0, g.peakRRPos ?? 0, g.peakRRNeg ?? 0,
-      JSON.stringify(g.rrMilestones ?? {}),
-      g.mt5ClosedTP ?? false, g.mt5CloseAt ?? null,
-      g.phantomSLHit ?? false, g.slHitAt ?? null, g.timeToSLMin ?? null,
-      g.openedAt ?? null,
-      g.lastPriceAt ?? null, g.estimatedCount ?? 0, g.blackoutMin ?? 0,
-      g.mt5CloseReason ?? null, g.currentRR ?? null,
+      ..._ghostStateBaseParams(g),
       // genormaliseerde marktcontext — zonder dit verliezen we VWAP R bij een restart
       g.ctx?.vwapDistR ?? null, g.ctx?.sessRangeR ?? null,
       g.ctx?.sessHighDistR ?? null, g.ctx?.sessLowDistR ?? null,
       g.ctx?.posInSessRange ?? null, g.ctx?.dayRangeR ?? null,
       g.ctx?.posInDayRange ?? null,
     ]);
-  } catch (e) { console.warn("[!] saveGhostState:", e.message); }
+  } catch (e) {
+    console.warn("[!] saveGhostState (with ctx):", e.message);
+    // FIX: if the ctx columns are momentarily missing (mid-migration on a fresh
+    // boot), don't let that fail the ENTIRE ghost_state save — RR milestones,
+    // SL/TP, mt5CloseReason etc. would otherwise silently stop persisting too,
+    // which is worse than just missing VWAP R for one boot. Fall back to saving
+    // everything except ctx; it self-heals once the columns land.
+    try {
+      await pool.query(`
+        INSERT INTO ghost_state (
+          position_id, daily_label, optimizer_key, symbol, asset_type, direction, session, vwap_position,
+          entry, sl, tp, lots, risk_eur, sl_pct, sl_dist,
+          vwap_mid, vwap_upper, vwap_lower, vwap_band_pct,
+          session_high, session_low, day_high, day_low, tv_entry, mt5_comment,
+          max_rr, peak_rr_pos, peak_rr_neg, rr_milestones,
+          mt5_closed_tp, mt5_close_at, phantom_sl_hit, sl_hit_at, time_to_sl_min,
+          opened_at, last_price_at, estimated_count, blackout_min,
+          mt5_close_reason, current_rr, updated_at
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,
+          $9,$10,$11,$12,$13,$14,$15,
+          $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,
+          $26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,NOW()
+        )
+        ON CONFLICT (position_id) DO UPDATE SET
+          max_rr          = EXCLUDED.max_rr,
+          peak_rr_pos     = EXCLUDED.peak_rr_pos,
+          peak_rr_neg     = EXCLUDED.peak_rr_neg,
+          rr_milestones   = EXCLUDED.rr_milestones,
+          mt5_closed_tp   = EXCLUDED.mt5_closed_tp,
+          mt5_close_at    = EXCLUDED.mt5_close_at,
+          phantom_sl_hit  = EXCLUDED.phantom_sl_hit,
+          sl_hit_at       = EXCLUDED.sl_hit_at,
+          time_to_sl_min  = EXCLUDED.time_to_sl_min,
+          last_price_at   = EXCLUDED.last_price_at,
+          estimated_count = EXCLUDED.estimated_count,
+          blackout_min    = EXCLUDED.blackout_min,
+          mt5_close_reason = EXCLUDED.mt5_close_reason,
+          current_rr      = EXCLUDED.current_rr,
+          lots            = COALESCE(EXCLUDED.lots, ghost_state.lots),
+          updated_at      = NOW()
+      `, _ghostStateBaseParams(g));
+    } catch (e2) { console.warn("[!] saveGhostState fallback also failed:", e2.message); }
+  }
 }
 
 async function loadAllGhostStates() {
   if (!DB_ENABLED) return [];
+  const baseSelect = `
+    position_id AS "positionId", daily_label AS "dailyLabel",
+    optimizer_key AS "optimizerKey", symbol, asset_type AS "assetType",
+    direction, session, vwap_position AS "vwapPosition",
+    CAST(entry AS FLOAT) AS entry, CAST(sl AS FLOAT) AS sl, CAST(tp AS FLOAT) AS tp,
+    CAST(lots AS FLOAT) AS lots, CAST(risk_eur AS FLOAT) AS "riskEur",
+    CAST(sl_pct AS FLOAT) AS "slPct", CAST(sl_dist AS FLOAT) AS "slDist",
+    CAST(vwap_mid AS FLOAT) AS "vwapMid",
+    CAST(vwap_upper AS FLOAT) AS "vwapUpper",
+    CAST(vwap_lower AS FLOAT) AS "vwapLower",
+    CAST(vwap_band_pct AS FLOAT) AS "vwapBandPct",
+    CAST(session_high AS FLOAT) AS "sessionHigh",
+    CAST(session_low AS FLOAT) AS "sessionLow",
+    CAST(day_high AS FLOAT) AS "dayHigh",
+    CAST(day_low AS FLOAT) AS "dayLow",
+    CAST(tv_entry AS FLOAT) AS "tvEntry",
+    mt5_comment AS "mt5Comment",
+    CAST(max_rr AS FLOAT) AS "maxRR",
+    CAST(peak_rr_pos AS FLOAT) AS "peakRRPos",
+    CAST(peak_rr_neg AS FLOAT) AS "peakRRNeg",
+    rr_milestones AS "rrMilestones",
+    mt5_closed_tp AS "mt5ClosedTP", mt5_close_at AS "mt5CloseAt",
+    phantom_sl_hit AS "phantomSLHit", sl_hit_at AS "slHitAt",
+    time_to_sl_min AS "timeToSLMin",
+    last_price_at AS "lastPriceAt",
+    mt5_close_reason AS "mt5CloseReason",
+    CAST(current_rr AS FLOAT) AS "currentRR",
+    estimated_count AS "estimatedCount",
+    CAST(blackout_min AS FLOAT) AS "blackoutMin",
+    opened_at AS "openedAt"`;
+  const ctxSelect = `,
+    -- genormaliseerde marktcontext (zie normaliseerContext in server.js)
+    CAST(vwap_dist_r AS FLOAT)       AS "vwapDistR",
+    CAST(sess_range_r AS FLOAT)      AS "sessRangeR",
+    CAST(sess_high_dist_r AS FLOAT)  AS "sessHighDistR",
+    CAST(sess_low_dist_r AS FLOAT)   AS "sessLowDistR",
+    CAST(pos_in_sess_range AS FLOAT) AS "posInSessRange",
+    CAST(day_range_r AS FLOAT)       AS "dayRangeR",
+    CAST(pos_in_day_range AS FLOAT)  AS "posInDayRange"`;
   try {
-    const r = await pool.query(`
-      SELECT
-        position_id AS "positionId", daily_label AS "dailyLabel",
-        optimizer_key AS "optimizerKey", symbol, asset_type AS "assetType",
-        direction, session, vwap_position AS "vwapPosition",
-        CAST(entry AS FLOAT) AS entry, CAST(sl AS FLOAT) AS sl, CAST(tp AS FLOAT) AS tp,
-        CAST(lots AS FLOAT) AS lots, CAST(risk_eur AS FLOAT) AS "riskEur",
-        CAST(sl_pct AS FLOAT) AS "slPct", CAST(sl_dist AS FLOAT) AS "slDist",
-        CAST(vwap_mid AS FLOAT) AS "vwapMid",
-        CAST(vwap_upper AS FLOAT) AS "vwapUpper",
-        CAST(vwap_lower AS FLOAT) AS "vwapLower",
-        CAST(vwap_band_pct AS FLOAT) AS "vwapBandPct",
-        CAST(session_high AS FLOAT) AS "sessionHigh",
-        CAST(session_low AS FLOAT) AS "sessionLow",
-        CAST(day_high AS FLOAT) AS "dayHigh",
-        CAST(day_low AS FLOAT) AS "dayLow",
-        CAST(tv_entry AS FLOAT) AS "tvEntry",
-        mt5_comment AS "mt5Comment",
-        CAST(max_rr AS FLOAT) AS "maxRR",
-        CAST(peak_rr_pos AS FLOAT) AS "peakRRPos",
-        CAST(peak_rr_neg AS FLOAT) AS "peakRRNeg",
-        rr_milestones AS "rrMilestones",
-        mt5_closed_tp AS "mt5ClosedTP", mt5_close_at AS "mt5CloseAt",
-        phantom_sl_hit AS "phantomSLHit", sl_hit_at AS "slHitAt",
-        time_to_sl_min AS "timeToSLMin",
-        last_price_at AS "lastPriceAt",
-        mt5_close_reason AS "mt5CloseReason",
-        CAST(current_rr AS FLOAT) AS "currentRR",
-        estimated_count AS "estimatedCount",
-        CAST(blackout_min AS FLOAT) AS "blackoutMin",
-        opened_at AS "openedAt",
-        -- genormaliseerde marktcontext (zie normaliseerContext in server.js)
-        CAST(vwap_dist_r AS FLOAT)       AS "vwapDistR",
-        CAST(sess_range_r AS FLOAT)      AS "sessRangeR",
-        CAST(sess_high_dist_r AS FLOAT)  AS "sessHighDistR",
-        CAST(sess_low_dist_r AS FLOAT)   AS "sessLowDistR",
-        CAST(pos_in_sess_range AS FLOAT) AS "posInSessRange",
-        CAST(day_range_r AS FLOAT)       AS "dayRangeR",
-        CAST(pos_in_day_range AS FLOAT)  AS "posInDayRange"
-      FROM ghost_state
-    `);
+    const r = await pool.query(`SELECT ${baseSelect}${ctxSelect} FROM ghost_state`);
     return r.rows;
-  } catch (e) { console.warn("[!] loadAllGhostStates:", e.message); return []; }
+  } catch (e) {
+    // FIX: if the context columns are ever momentarily missing (mid-migration on a
+    // fresh boot), don't throw away every open position for the whole restart —
+    // fall back to the columns we know exist. ctx just comes back null for that
+    // boot and self-heals the next time saveGhostState() runs.
+    console.warn("[!] loadAllGhostStates: context columns unavailable, falling back:", e.message);
+    try {
+      const r2 = await pool.query(`SELECT ${baseSelect} FROM ghost_state`);
+      return r2.rows;
+    } catch (e2) { console.warn("[!] loadAllGhostStates fallback also failed:", e2.message); return []; }
+  }
 }
 
 async function deleteGhostState(positionId) {
@@ -770,6 +836,58 @@ async function saveGhostTrade(g) {
            g.peakRRNeg??0]
         );
       } catch(e2) { console.warn("[!] saveGhostTrade fallback:", e2.message); }
+    } else if (e.code === '42703' || e.message.includes('column') && e.message.includes('does not exist')) {
+      // FIX: a missing ctx column (vwap_dist_r etc.) must not fail the WHOLE
+      // finalize insert — that would silently drop peak R, milestones, and
+      // everything else for the trade, not just VWAP R. Retry without ctx.
+      console.warn("[!] saveGhostTrade: ctx column missing, retrying without ctx:", e.message);
+      try {
+        await pool.query(`
+          INSERT INTO ghost_trades (
+            position_id, daily_label, optimizer_key, symbol, asset_type, direction, session, vwap_position,
+            entry, sl, tp, lots, risk_eur, sl_pct, sl_dist,
+            vwap_mid, vwap_upper, vwap_lower, vwap_band_pct,
+            session_high, session_low, day_high, day_low, tv_entry, mt5_comment,
+            peak_rr_pos, rr_milestones, time_to_sl_min,
+            mt5_close_reason, opened_at, closed_at, peak_rr_neg,
+            finalize_reason, data_complete, milestones_estimated, blackout_min
+          ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,
+            $9,$10,$11,$12,$13,$14,$15,
+            $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,
+            $26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36
+          )
+          ON CONFLICT (position_id) DO UPDATE SET
+            peak_rr_pos     = EXCLUDED.peak_rr_pos,
+            peak_rr_neg     = EXCLUDED.peak_rr_neg,
+            finalize_reason = EXCLUDED.finalize_reason,
+            data_complete   = EXCLUDED.data_complete,
+            milestones_estimated = EXCLUDED.milestones_estimated,
+            blackout_min    = EXCLUDED.blackout_min,
+            rr_milestones   = EXCLUDED.rr_milestones,
+            time_to_sl_min  = EXCLUDED.time_to_sl_min,
+            closed_at       = EXCLUDED.closed_at,
+            lots            = COALESCE(EXCLUDED.lots, ghost_trades.lots)
+        `, [
+          g.positionId, g.dailyLabel,
+          g.optimizerKey, g.symbol, g.assetType, g.direction, g.session, g.vwapPosition,
+          g.entry, g.sl, g.tp ?? null, g.lots ?? null, g.riskEur ?? null,
+          g.slPct ?? null, g.slDist ?? null,
+          g.vwapMid ?? null, g.vwapUpper ?? null, g.vwapLower ?? null, g.vwapBandPct ?? null,
+          g.sessionHigh ?? null, g.sessionLow ?? null, g.dayHigh ?? null, g.dayLow ?? null,
+          g.tvEntry ?? null, g.mt5Comment ?? null,
+          g.peakRRPos ?? 0,
+          JSON.stringify(g.rrMilestones ?? {}),
+          g.timeToSLMin ?? null,
+          g.mt5CloseReason ?? null,
+          g.openedAt ?? null, g.closedAt ?? new Date().toISOString(),
+          g.peakRRNeg ?? 0,
+          g.finalizeReason ?? null,
+          g.dataComplete !== false,
+          g.estimatedCount ?? 0,
+          g.blackoutMin ?? 0,
+        ]);
+      } catch (e2) { console.warn("[!] saveGhostTrade ctx-fallback also failed:", e2.message); }
     } else { console.warn("[!] saveGhostTrade:", e.message); }
   }
 }
