@@ -641,6 +641,10 @@ async function finalizeGhost(ghost) {
     closedAt:       ghost.slHitAt ?? new Date().toISOString(),
     finalizeReason: ghost.finalizeReason ?? (ghost.mt5CloseReason === "sl" ? "mt5_sl" : "sl_hit"),
     dataComplete:   ghost.dataComplete !== false,
+    // FIX: without this, ghost.ctx (vwapDistR, sessRangeR, posInSessRange, ...) never
+    // reaches db.saveGhostTrade, which reads g.ctx?.vwapDistR — so every FINISHED
+    // trade saved VWAP R as null even though it was correctly computed at signal time.
+    ctx:            ghost.ctx,
   });
   await db.deleteGhostState(ghost.positionId);
   const pos = openPositions.get(ghost.positionId);
@@ -1552,8 +1556,15 @@ async function initBackground() {
     const states = await db.loadAllGhostStates();
     for (const g of states) {
       if (!g.positionId || !g.entry || !g.sl) continue;
-      const pos = { positionId: g.positionId, dailyLabel: g.dailyLabel, symbol: g.symbol, assetType: g.assetType, direction: g.direction, session: g.session, vwapPosition: g.vwapPosition, optimizerKey: g.optimizerKey, entry: g.entry, sl: g.sl, tp: g.tp, lots: g.lots, riskEur: g.riskEur, slPct: g.slPct, slDist: g.slDist, vwapMid: g.vwapMid, vwapUpper: g.vwapUpper, vwapLower: g.vwapLower, vwapBandPct: g.vwapBandPct, sessionHigh: g.sessionHigh, sessionLow: g.sessionLow, dayHigh: g.dayHigh, dayLow: g.dayLow, tvEntry: g.tvEntry, mt5Comment: g.mt5Comment, openedAt: g.openedAt, mt5Closed: g.mt5ClosedTP ?? false, currentPrice: g.entry, livePnl: 0,
-        ghost: { positionId: g.positionId, dailyLabel: g.dailyLabel, optimizerKey: g.optimizerKey, symbol: g.symbol, assetType: g.assetType, direction: g.direction, session: g.session, vwapPosition: g.vwapPosition, entry: g.entry, sl: g.sl, tp: g.tp, lots: g.lots, riskEur: g.riskEur, slPct: g.slPct, slDist: g.slDist, vwapMid: g.vwapMid, vwapUpper: g.vwapUpper, vwapLower: g.vwapLower, vwapBandPct: g.vwapBandPct, sessionHigh: g.sessionHigh, sessionLow: g.sessionLow, dayHigh: g.dayHigh, dayLow: g.dayLow, tvEntry: g.tvEntry, mt5Comment: g.mt5Comment, openedAt: g.openedAt, maxRR: g.maxRR ?? 0, peakRRPos: g.peakRRPos ?? 0, peakRRNeg: g.peakRRNeg ?? 0, currentRR: g.currentRR ?? null, lastPriceAt: g.lastPriceAt ?? null, estimatedCount: g.estimatedCount ?? 0, blackoutMin: g.blackoutMin ?? 0, rrMilestones: saneerMilestones(g.rrMilestones), mt5ClosedTP: g.mt5ClosedTP ?? false, mt5CloseAt: g.mt5CloseAt ?? null, mt5CloseReason: g.mt5CloseReason ?? null, phantomSLHit: g.phantomSLHit ?? false, slHitAt: g.slHitAt ?? null, timeToSLMin: g.timeToSLMin ?? null },
+      // FIX: rebuild the normalized market context (VWAP R, sess/day range R, ...)
+      // from the flat columns loadAllGhostStates() now returns. Without this, a
+      // restart wiped ctx entirely — pos.ctx/ghost.ctx came back undefined, so
+      // VWAP R showed "--" for the rest of that trade's life, restart or not.
+      const restoredCtx = (g.vwapDistR != null || g.sessRangeR != null || g.posInSessRange != null || g.posInDayRange != null)
+        ? { vwapDistR: g.vwapDistR ?? null, sessRangeR: g.sessRangeR ?? null, sessHighDistR: g.sessHighDistR ?? null, sessLowDistR: g.sessLowDistR ?? null, posInSessRange: g.posInSessRange ?? null, dayRangeR: g.dayRangeR ?? null, posInDayRange: g.posInDayRange ?? null }
+        : null;
+      const pos = { positionId: g.positionId, dailyLabel: g.dailyLabel, symbol: g.symbol, assetType: g.assetType, direction: g.direction, session: g.session, vwapPosition: g.vwapPosition, optimizerKey: g.optimizerKey, entry: g.entry, sl: g.sl, tp: g.tp, lots: g.lots, riskEur: g.riskEur, slPct: g.slPct, slDist: g.slDist, vwapMid: g.vwapMid, vwapUpper: g.vwapUpper, vwapLower: g.vwapLower, vwapBandPct: g.vwapBandPct, sessionHigh: g.sessionHigh, sessionLow: g.sessionLow, dayHigh: g.dayHigh, dayLow: g.dayLow, tvEntry: g.tvEntry, mt5Comment: g.mt5Comment, openedAt: g.openedAt, mt5Closed: g.mt5ClosedTP ?? false, currentPrice: g.entry, livePnl: 0, ctx: restoredCtx,
+        ghost: { positionId: g.positionId, dailyLabel: g.dailyLabel, optimizerKey: g.optimizerKey, symbol: g.symbol, assetType: g.assetType, direction: g.direction, session: g.session, vwapPosition: g.vwapPosition, entry: g.entry, sl: g.sl, tp: g.tp, lots: g.lots, riskEur: g.riskEur, slPct: g.slPct, slDist: g.slDist, vwapMid: g.vwapMid, vwapUpper: g.vwapUpper, vwapLower: g.vwapLower, vwapBandPct: g.vwapBandPct, sessionHigh: g.sessionHigh, sessionLow: g.sessionLow, dayHigh: g.dayHigh, dayLow: g.dayLow, tvEntry: g.tvEntry, mt5Comment: g.mt5Comment, openedAt: g.openedAt, maxRR: g.maxRR ?? 0, peakRRPos: g.peakRRPos ?? 0, peakRRNeg: g.peakRRNeg ?? 0, currentRR: g.currentRR ?? null, lastPriceAt: g.lastPriceAt ?? null, estimatedCount: g.estimatedCount ?? 0, blackoutMin: g.blackoutMin ?? 0, rrMilestones: saneerMilestones(g.rrMilestones), mt5ClosedTP: g.mt5ClosedTP ?? false, mt5CloseAt: g.mt5CloseAt ?? null, mt5CloseReason: g.mt5CloseReason ?? null, phantomSLHit: g.phantomSLHit ?? false, slHitAt: g.slHitAt ?? null, timeToSLMin: g.timeToSLMin ?? null, ctx: restoredCtx },
       };
       openPositions.set(g.positionId, pos);
     }
