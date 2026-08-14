@@ -288,6 +288,13 @@ async function initDB() {
       ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS mt5_comment     TEXT;
       ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS mt5_close_at    TIMESTAMPTZ;
       ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS time_to_sl_min  INTEGER;
+      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS vwap_dist_r       NUMERIC;
+      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS sess_range_r      NUMERIC;
+      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS sess_high_dist_r  NUMERIC;
+      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS sess_low_dist_r   NUMERIC;
+      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS pos_in_sess_range NUMERIC;
+      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS day_range_r       NUMERIC;
+      ALTER TABLE ghost_state    ADD COLUMN IF NOT EXISTS pos_in_day_range  NUMERIC;
     `);
     await client.query(`
       ALTER TABLE ghost_trades   ADD COLUMN IF NOT EXISTS optimizer_key   TEXT;
@@ -576,12 +583,17 @@ async function saveGhostState(g) {
         max_rr, peak_rr_pos, peak_rr_neg, rr_milestones,
         mt5_closed_tp, mt5_close_at, phantom_sl_hit, sl_hit_at, time_to_sl_min,
         opened_at, last_price_at, estimated_count, blackout_min,
-        mt5_close_reason, current_rr, updated_at
+        mt5_close_reason, current_rr,
+        vwap_dist_r, sess_range_r, sess_high_dist_r, sess_low_dist_r,
+        pos_in_sess_range, day_range_r, pos_in_day_range,
+        updated_at
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,
         $9,$10,$11,$12,$13,$14,$15,
         $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,
-        $26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,NOW()
+        $26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,
+        $41,$42,$43,$44,$45,$46,$47,
+        NOW()
       )
       ON CONFLICT (position_id) DO UPDATE SET
         max_rr          = EXCLUDED.max_rr,
@@ -598,6 +610,13 @@ async function saveGhostState(g) {
         blackout_min    = EXCLUDED.blackout_min,
         mt5_close_reason = EXCLUDED.mt5_close_reason,
         current_rr      = EXCLUDED.current_rr,
+        vwap_dist_r       = EXCLUDED.vwap_dist_r,
+        sess_range_r      = EXCLUDED.sess_range_r,
+        sess_high_dist_r  = EXCLUDED.sess_high_dist_r,
+        sess_low_dist_r   = EXCLUDED.sess_low_dist_r,
+        pos_in_sess_range = EXCLUDED.pos_in_sess_range,
+        day_range_r       = EXCLUDED.day_range_r,
+        pos_in_day_range  = EXCLUDED.pos_in_day_range,
         lots            = COALESCE(EXCLUDED.lots, ghost_state.lots),
         updated_at      = NOW()
     `, [
@@ -615,6 +634,11 @@ async function saveGhostState(g) {
       g.openedAt ?? null,
       g.lastPriceAt ?? null, g.estimatedCount ?? 0, g.blackoutMin ?? 0,
       g.mt5CloseReason ?? null, g.currentRR ?? null,
+      // genormaliseerde marktcontext — zonder dit verliezen we VWAP R bij een restart
+      g.ctx?.vwapDistR ?? null, g.ctx?.sessRangeR ?? null,
+      g.ctx?.sessHighDistR ?? null, g.ctx?.sessLowDistR ?? null,
+      g.ctx?.posInSessRange ?? null, g.ctx?.dayRangeR ?? null,
+      g.ctx?.posInDayRange ?? null,
     ]);
   } catch (e) { console.warn("[!] saveGhostState:", e.message); }
 }
@@ -652,7 +676,15 @@ async function loadAllGhostStates() {
         CAST(current_rr AS FLOAT) AS "currentRR",
         estimated_count AS "estimatedCount",
         CAST(blackout_min AS FLOAT) AS "blackoutMin",
-        opened_at AS "openedAt"
+        opened_at AS "openedAt",
+        -- genormaliseerde marktcontext (zie normaliseerContext in server.js)
+        CAST(vwap_dist_r AS FLOAT)       AS "vwapDistR",
+        CAST(sess_range_r AS FLOAT)      AS "sessRangeR",
+        CAST(sess_high_dist_r AS FLOAT)  AS "sessHighDistR",
+        CAST(sess_low_dist_r AS FLOAT)   AS "sessLowDistR",
+        CAST(pos_in_sess_range AS FLOAT) AS "posInSessRange",
+        CAST(day_range_r AS FLOAT)       AS "dayRangeR",
+        CAST(pos_in_day_range AS FLOAT)  AS "posInDayRange"
       FROM ghost_state
     `);
     return r.rows;
