@@ -1,0 +1,389 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © eltrudi
+
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+// PRONTO ORB · ALLEEN GEVERIFIEERDE SLOTS  ·  v5.2 (23-09-2026)
+//  →  Railway / MetaApi / MT5
+//
+// T.O.V. DE ORIGINELE v5 (22/09/2026) IS ALLEEN TOEGEVOEGD, NIETS VERWIJDERD:
+//   MGC   09:30  30m Met ×2 2R, venster 300m
+//      → dit is het oorspronkelijke v4-slot: LIVE-TRACKED geconfirmeerd
+//        destijds (n=63, WR 49%, t 2.58), en bleef in elke recente v5-scan
+//        (zowel EV pts als EV R) bovenaan staan.
+//   UK100 18:00  10m Tegen ×1 3R, venster 180m*
+//      → uit een script-3 herbevestigingsrun: t 2.1-2.4, WR ~43%, n≈35,
+//        OOS R positief. *venster-lengte bij benadering overgenomen van
+//        het naastgelegen 18:30-slot — controleer dit tegen je eigen
+//        script 2/3-output voor je het op grotere risk-sizing vertrouwt.
+//
+// De originele 10 slots (incl. MGC 03:00/05:00/06:00) staan ONGEWIJZIGD in
+// dit script — de eerdere twijfel over hun OOS R-teken is niet bevestigd,
+// dus ze zijn niet verwijderd.
+//
+//   slot           ORB  VWAP    SL×   RR    venster   n    WR    EV(R)   t
+//   MNQ 04:00      10m  Met     ×1.5  3.5R   60m      39   41%   0.85    2.4
+//   MNQ 06:00      15m  Met     ×1.5  2R    240m      49   47%   0.41    1.9   ← grensgeval, t<2
+//   MNQ 07:00      20m  Met     ×1    3.5R  120m      40   48%   1.17    3.3
+//   MGC 03:00      10m  Met     ×1    4R     60m      40   35%   0.86    2.3
+//   MGC 05:00      30m  Met     ×1.5  3.5R  120m      34   35%   0.94    2.6
+//   MGC 06:00      30m  Met     ×2    2.5R  180m      46   43%   0.64    2.6
+//   MGC 09:30      30m  Met     ×2    2R    300m      63   49%   —       2.58  ← NIEUW (v4-slot herbevestigd)
+//   GER40 16:30    15m  Tegen   ×1.5  1.5R  300m      32   47%   0.32    1.5   ← zwak, t<2
+//   GER40 08:30    10m  Met     ×1    2R     60m      52   46%   0.38    1.8   ← grensgeval, t<2
+//   UK100 18:30    15m  Tegen   ×1    4R    180m      34   29%   0.61    1.5   ← zwak, t<2
+//   UK100 18:00    10m  Tegen   ×1    3R    180m*     ~35  ~43%  0.77    2.4   ← NIEUW, *venster geschat
+//   UK100 19:00    10m  Tegen   ×1.5  4R    120m      34   26%   0.44    1.2   ← zwakste t van de 12
+//
+// Nog steeds t<2 bij: MNQ 06:00, GER40 16:30, GER40 08:30, UK100 18:30,
+// UK100 19:00. Weeg dat mee in je risk-sizing.
+//
+// ÉÉN TRADE PER (STARTTIJD + ORB-LENGTE)
+//   Blijft als vangnet staan, ook al is er binnen deze 12 geen overlap.
+//
+// HOUDTIJD
+//   Standaard 100000 minuten = praktisch onbegrensd, bewust — de scanner die
+//   deze EV's mat gebruikte onbegrensde houdtijd en de bridge sluit niet op
+//   tijd (ENFORCE_EXPIRY=false). Zet je hier 120, dan meet je iets anders dan
+//   je verhandelt.
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("PRONTO ORB · 23/09/2026 geverifieerd", overlay = true,
+     max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+gA = "① Algemeen"
+gB = "② Risico & exit"
+gC = "③ Weergave"
+
+preset  = input.string("Auto", "Preset",
+     options = ["Auto", "MGC", "MNQ", "GER", "UK"], group = gA,
+     tooltip = "Auto = herkent het chartsymbool zelf. Geen toggle nodig.\n" +
+               "Alleen instrumenten met apart geverifieerde slots staan hier —\n" +
+               "OIL, BTC, ETH, XRP, SOL, SIL zijn bewust weggelaten.")
+TZ      = input.string("Europe/Brussels", "Tijdzone",
+     options = ["Europe/Brussels", "America/New_York", "GMT+1", "GMT+0"], group = gA)
+symOver = input.string("", "Symbool override (leeg = chart-ticker)", group = gA)
+alertsAan = input.bool(true, "Webhook-alerts aan", group = gA)
+
+houdMin = input.int(100000, "Max houdtijd (minuten)", minval = 5, step = 5, group = gB,
+     tooltip = "100000 = praktisch onbegrensd, en dat hoort ook.\n\n" +
+               "De scanner mat deze cijfers ZONDER houdtijdlimiet, en de bridge sluit\n" +
+               "posities niet op tijd. Zet je hier 120, dan sluit dit script intern\n" +
+               "na 2 uur af terwijl je live positie doorloopt — twee verschillende\n" +
+               "strategieën, en de tabel hieronder meet dan de verkeerde.")
+riskPct = input.float(0.25, "Risk % per trade (alleen logging)", minval = 0.01, step = 0.05, group = gB,
+     tooltip = "Gaat mee in de webhook maar doet niets meer: de bridge rekent met een\n" +
+               "vast bedrag (RISK_EUR). Blijft staan zodat de payload ongewijzigd is.")
+
+lijnBars = input.int(8, "SL/TP lijnlengte (bars)", minval = 2, maxval = 60, group = gC)
+labelVol = input.bool(false, "Volledig label (i.p.v. pijl + tooltip)", group = gC)
+toonBox  = input.bool(true, "ORB-boxen",     group = gC)
+toonLbl  = input.bool(true, "Entry-labels",  group = gC)
+toonLijn = input.bool(true, "SL/TP-lijnen",  group = gC)
+toonTab  = input.bool(true, "Controletabel", group = gC)
+toonGeblok = input.bool(false, "Geblokkeerde slots in tabel tonen", group = gC)
+toonVwap = input.bool(true, "VWAP tekenen", group = gC)
+vwAnker  = input.string("Sessie", "VWAP-anker", options = ["Sessie", "Dag (tijdzone)"], group = gC,
+     tooltip = "Sessie = reset bij de futures-sessieopen. Dít gebruikte de scanner ook.\n" +
+               "Wijk je hier af, dan neem je andere trades dan je gemeten hebt.")
+
+// ── Symboolherkenning — alleen de 4 geverifieerde instrumenten ────────────
+_tk = str.upper(syminfo.ticker)
+_isG = str.contains(_tk, "MGC") or str.contains(_tk, "XAU") or str.contains(_tk, "GOLD")
+_isN = str.contains(_tk, "MNQ") or str.contains(_tk, "NAS")
+_isD = str.contains(_tk, "GER") or str.contains(_tk, "DAX")
+_isU = str.contains(_tk, "UK100") or str.contains(_tk, "FTSE")
+
+effPreset = preset != "Auto" ? preset :
+     _isG ? "MGC" : _isN ? "MNQ" : _isD ? "GER" : _isU ? "UK" : "Geen"
+
+var int N = 0
+var array<string> slDir = na
+var array<int>    slH   = na
+var array<int>    slM   = na
+var array<int>    slOrb = na
+var array<float>  slMul = na
+var array<string> slVw  = na
+var array<float>  slRR  = na
+var array<float>  slEV  = na
+var array<int>    slWin = na   // venster (min) na ORB — apart per slot geverifieerd
+var array<bool>   slAct = na
+
+if barstate.isfirst
+    if effPreset == "MGC"
+        // Origineel 03:00/05:00/06:00 ONGEWIJZIGD + 09:30 toegevoegd (v4-slot).
+        slDir := array.from("Beide", "Beide", "Beide", "Beide")
+        slH   := array.from(3, 5, 6, 9)
+        slM   := array.from(0, 0, 0, 30)
+        slOrb := array.from(10, 30, 30, 30)
+        slMul := array.from(1.0, 1.5, 2.0, 2.0)
+        slVw  := array.from("Met", "Met", "Met", "Met")
+        slRR  := array.from(4.0, 3.5, 2.5, 2.0)
+        slEV  := array.from(860, 940, 640, 500)
+        slWin := array.from(60, 120, 180, 300)
+    else if effPreset == "MNQ"
+        // Ongewijzigd.
+        slDir := array.from("Beide", "Beide", "Beide")
+        slH   := array.from(4, 6, 7)
+        slM   := array.from(0, 0, 0)
+        slOrb := array.from(10, 15, 20)
+        slMul := array.from(1.5, 1.5, 1.0)
+        slVw  := array.from("Met", "Met", "Met")
+        slRR  := array.from(3.5, 2.0, 3.5)
+        slEV  := array.from(850, 410, 1170)
+        slWin := array.from(60, 240, 120)
+    else if effPreset == "GER"
+        // Ongewijzigd.
+        slDir := array.from("Beide", "Beide")
+        slH   := array.from(16, 8)
+        slM   := array.from(30, 30)
+        slOrb := array.from(15, 10)
+        slMul := array.from(1.5, 1.0)
+        slVw  := array.from("Tegen", "Met")
+        slRR  := array.from(1.5, 2.0)
+        slEV  := array.from(320, 380)
+        slWin := array.from(300, 60)
+    else if effPreset == "UK"
+        // Origineel 18:30/19:00 ONGEWIJZIGD + 18:00 toegevoegd.
+        slDir := array.from("Beide", "Beide", "Beide")
+        slH   := array.from(18, 19, 18)
+        slM   := array.from(30, 0, 0)
+        slOrb := array.from(15, 10, 10)
+        slMul := array.from(1.0, 1.5, 1.0)
+        slVw  := array.from("Tegen", "Tegen", "Tegen")
+        slRR  := array.from(4.0, 4.0, 3.0)
+        slEV  := array.from(610, 440, 750)
+        slWin := array.from(180, 120, 180)   // 18:00-venster GESCHAT, controleer
+    else
+        // Auto vond geen van de 4 geverifieerde symbolen. Alles stil uit.
+        slDir := array.new<string>(1, "Beide")
+        slH   := array.new<int>(1, 0)
+        slM   := array.new<int>(1, 0)
+        slOrb := array.new<int>(1, 10)
+        slMul := array.new<float>(1, 1.0)
+        slVw  := array.new<string>(1, "Uit")
+        slRR  := array.new<float>(1, 1.0)
+        slEV  := array.new<float>(1, 0.0)
+        slWin := array.new<int>(1, 120)
+
+    N := array.size(slDir)
+
+    // ── Eén winnaar per (starttijd + ORB-lengte) ──────────────────────────
+    slAct := array.new<bool>(N, effPreset != "Geen")
+    for i = 0 to N - 1
+        if array.get(slAct, i)
+            _win = true
+            for k = 0 to N - 1
+                if k != i and array.get(slAct, k)
+                    _zelfde = array.get(slH, k) == array.get(slH, i) and
+                              array.get(slM, k) == array.get(slM, i) and
+                              array.get(slOrb, k) == array.get(slOrb, i)
+                    if _zelfde
+                        _beter = array.get(slEV, k) > array.get(slEV, i) or
+                                 (array.get(slEV, k) == array.get(slEV, i) and k < i)
+                        if _beter
+                            _win := false
+            array.set(slAct, i, _win)
+
+var array<float> sHi  = na
+var array<float> sLo  = na
+var array<int>   sSig = na
+var array<box>   sBox = na
+var array<int>   cN   = na
+var array<int>   cWin = na
+var int tradeNr = 0
+
+if barstate.isfirst
+    sHi  := array.new<float>(N, na)
+    sLo  := array.new<float>(N, na)
+    sSig := array.new<int>(N, 0)
+    sBox := array.new<box>(N, na)
+    cN   := array.new<int>(N, 0)
+    cWin := array.new<int>(N, 0)
+
+type Pos
+    float e
+    float stop
+    float tp
+    int   dir
+    int   slot
+    int   dl
+    line  lSL
+    line  lTP
+var array<Pos> pos = array.new<Pos>()
+
+barMin = hour(time, TZ) * 60 + minute(time, TZ)
+newDay = ta.change(time("D")) != 0
+_vwSes = ta.vwap(hlc3)
+_vwDag = ta.vwap(hlc3, newDay)
+vw     = vwAnker == "Sessie" ? _vwSes : _vwDag
+dec    = syminfo.mintick >= 0.01 ? 2 : 5
+sym    = symOver == "" ? syminfo.ticker : symOver
+mag    = effPreset != "Geen"
+
+if newDay
+    for i = 0 to N - 1
+        array.set(sHi, i, na), array.set(sLo, i, na)
+        array.set(sSig, i, 0), array.set(sBox, i, na)
+
+orders = array.new<string>()
+
+if barstate.isconfirmed and mag
+    for i = 0 to N - 1
+        if array.get(slAct, i)
+            _st  = array.get(slH, i) * 60 + array.get(slM, i)
+            _en  = _st + array.get(slOrb, i)
+            _win = array.get(slWin, i)   // eigen geverifieerd venster per slot
+
+            if barMin >= _st and barMin < _en
+                _h = array.get(sHi, i), _l = array.get(sLo, i)
+                array.set(sHi, i, na(_h) ? high : math.max(_h, high))
+                array.set(sLo, i, na(_l) ? low  : math.min(_l, low))
+                if toonBox
+                    _bx = array.get(sBox, i)
+                    if na(_bx)
+                        array.set(sBox, i, box.new(bar_index, high, bar_index, low,
+                             border_color = color.new(color.orange, 35),
+                             bgcolor = color.new(color.orange, 91),
+                             text = "S" + str.tostring(i + 1) + " " + str.tostring(array.get(slOrb, i)) + "m",
+                             text_color = color.new(color.orange, 30), text_size = size.tiny))
+                    else
+                        box.set_right(_bx, bar_index)
+                        box.set_top(_bx, array.get(sHi, i)), box.set_bottom(_bx, array.get(sLo, i))
+
+            if barMin >= _en and barMin < _en + _win and array.get(sSig, i) == 0
+                _hi = array.get(sHi, i), _lo = array.get(sLo, i)
+                if not na(_hi) and not na(_lo)
+                    _up = close > _hi and close[1] <= _hi
+                    _dn = close < _lo and close[1] >= _lo
+                    if _up or _dn
+                        _lg = _up
+                        _vs = array.get(slVw, i)
+                        _vOk = _vs == "Uit" ? true : _vs == "Met" ? (_lg ? close > vw : close < vw) : (_lg ? close < vw : close > vw)
+                        if _vOk
+                            _ruw = _lg ? close - _lo : _hi - close
+                            _d   = math.max(_ruw, syminfo.mintick)
+                            _stp = _d * array.get(slMul, i)
+                            _tpd = _stp * array.get(slRR, i)
+                            _slP = _lg ? close - _stp : close + _stp
+                            _tpP = _lg ? close + _tpd : close - _tpd
+                            tradeNr := tradeNr + 1
+                            array.set(sSig, i, 1)
+                            array.set(cN, i, array.get(cN, i) + 1)
+
+                            _l1 = toonLijn ? line.new(bar_index, _slP, bar_index + lijnBars, _slP,
+                                 color = color.new(color.red, 10), width = 2) : na
+                            _l2 = toonLijn ? line.new(bar_index, _tpP, bar_index + lijnBars, _tpP,
+                                 color = color.new(color.green, 10), width = 2) : na
+                            if toonLijn
+                                label.new(bar_index + lijnBars, _slP, "SL " + str.tostring(math.round(_slP, dec)),
+                                     style = label.style_none, textcolor = color.new(color.red, 15), size = size.tiny)
+                                label.new(bar_index + lijnBars, _tpP, "TP " + str.tostring(math.round(_tpP, dec)),
+                                     style = label.style_none, textcolor = color.new(color.green, 15), size = size.tiny)
+
+                            _tip = "Slot " + str.tostring(i + 1) + (_lg ? "  BUY" : "  SELL") +
+                                 "\nstart " + str.format("{0,number,00}:{1,number,00}",
+                                      array.get(slH, i), array.get(slM, i)) +
+                                 "   ORB " + str.tostring(array.get(slOrb, i)) + "m" +
+                                 "   venster " + str.tostring(_win) + "m" +
+                                 "\nentry " + str.tostring(math.round(close, dec)) +
+                                 "\nSL " + str.tostring(math.round(_slP, dec)) +
+                                 "  (×" + str.tostring(array.get(slMul, i), "#.#") + ")" +
+                                 "\nTP " + str.tostring(math.round(_tpP, dec)) +
+                                 "  (" + str.tostring(array.get(slRR, i), "#.#") + "R)" +
+                                 "\nVWAP " + _vs
+                            _lb = toonLbl ? label.new(bar_index, _lg ? low : high,
+                                 labelVol ? "S" + str.tostring(i + 1) + (_lg ? " ▲ BUY" : " ▼ SELL") : "",
+                                 style = labelVol ? (_lg ? label.style_label_up : label.style_label_down)
+                                                  : (_lg ? label.style_triangleup : label.style_triangledown),
+                                 color = _lg ? color.new(color.green, 10) : color.new(color.red, 10),
+                                 textcolor = color.white, size = size.tiny, tooltip = _tip) : na
+
+                            array.push(pos, Pos.new(close, _stp, _tpd, _lg ? 1 : 0, i,
+                                 time + houdMin * 60000, _l1, _l2))
+
+                            _id = sym + "-" +
+                                 str.format("{0,number,00}{1,number,00}", array.get(slH, i), array.get(slM, i)) + "-" +
+                                 str.tostring(array.get(slOrb, i)) + "m-x" +
+                                 str.tostring(array.get(slMul, i), "#.#") + "-" +
+                                 str.lower(_vs) + "-" + str.tostring(array.get(slRR, i), "#.#") + "R"
+
+                            array.push(orders,
+                                 '{"action":"'      + (_lg ? "buy" : "sell")                       + '"' +
+                                  ',"symbol":"'     + sym                                          + '"' +
+                                  ',"slot_id":"'    + _id                                          + '"' +
+                                  ',"slot":'        + str.tostring(i + 1)                                +
+                                  ',"trade_no":'    + str.tostring(tradeNr)                              +
+                                  ',"entry":'       + str.tostring(math.round(close, dec))                +
+                                  ',"sl":'          + str.tostring(math.round(_slP, dec))                 +
+                                  ',"sl_points":'   + str.tostring(math.round(_stp, dec))                 +
+                                  ',"tp":'          + str.tostring(math.round(_tpP, dec))                 +
+                                  ',"tp_points":'   + str.tostring(math.round(_tpd, dec))                 +
+                                  ',"rr":'          + str.tostring(array.get(slRR, i), "#.#")             +
+                                  ',"sl_mult":'     + str.tostring(array.get(slMul, i), "#.#")            +
+                                  ',"orb_start":"'  + str.format("{0,number,00}:{1,number,00}",
+                                                         array.get(slH, i), array.get(slM, i))      + '"' +
+                                  ',"orb_minutes":' + str.tostring(array.get(slOrb, i))                   +
+                                  ',"venster_min":' + str.tostring(_win)                                  +
+                                  ',"orb_high":'    + str.tostring(math.round(_hi, dec))                  +
+                                  ',"orb_low":'     + str.tostring(math.round(_lo, dec))                  +
+                                  ',"vwap_side":"'  + str.lower(_vs)                               + '"' +
+                                  ',"vwap":'        + str.tostring(math.round(vw, dec))                   +
+                                  ',"risk_pct":'    + str.tostring(riskPct, "#.##")                       +
+                                  ',"expires_at":"' + str.format_time(time + houdMin * 60000,
+                                                         "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")         + '"' +
+                                  '}')
+
+if array.size(pos) > 0
+    for i = array.size(pos) - 1 to 0
+        p   = array.get(pos, i)
+        fav = p.dir == 1 ? high - p.e : p.e - low
+        adv = p.dir == 1 ? p.e - low  : high - p.e
+        _sl = adv >= p.stop
+        _tp = fav >= p.tp
+        if _sl or _tp or time >= p.dl
+            if _tp and not _sl
+                array.set(cWin, p.slot, array.get(cWin, p.slot) + 1)
+                if not na(p.lTP)
+                    line.set_color(p.lTP, color.new(color.green, 0))
+            array.remove(pos, i)
+
+if alertsAan and mag and array.size(orders) > 0
+    alert('{"orders":[' + array.join(orders, ",") + ']}', alert.freq_once_per_bar_close)
+
+if barstate.islast and toonTab
+    var table t = table.new(position.bottom_right, 10, N + 3, border_width = 1,
+         frame_color = color.new(color.gray, 40), frame_width = 1)
+    table.clear(t, 0, 0, 9, N + 2)
+    hh = color.new(color.teal, 10)
+    kk = array.from("slot", "start", "ORB", "venster", "SL×", "VWAP", "RR", "n", "TP", "WR")
+    for c = 0 to 9
+        table.cell(t, c, 0, array.get(kk, c), text_color = color.white, bgcolor = hh, text_size = size.tiny)
+    _r = 1
+    for i = 0 to N - 1
+        _aan = array.get(slAct, i)
+        if _aan or toonGeblok
+            _tc = _aan ? color.white : color.new(color.gray, 55)
+            _n  = array.get(cN, i)
+            _w  = array.get(cWin, i)
+            table.cell(t, 0, _r, "S" + str.tostring(i + 1) + (_aan ? "" : " ✕"), text_color = _tc, text_size = size.tiny)
+            table.cell(t, 1, _r, str.format("{0,number,00}:{1,number,00}",
+                 array.get(slH, i), array.get(slM, i)), text_color = _tc, text_size = size.tiny)
+            table.cell(t, 2, _r, str.tostring(array.get(slOrb, i)) + "m", text_color = _tc, text_size = size.tiny)
+            table.cell(t, 3, _r, str.tostring(array.get(slWin, i)) + "m", text_color = color.new(color.aqua, 0), text_size = size.tiny)
+            table.cell(t, 4, _r, "×" + str.tostring(array.get(slMul, i), "#.#"), text_color = _tc, text_size = size.tiny)
+            table.cell(t, 5, _r, array.get(slVw, i), text_color = _tc, text_size = size.tiny)
+            table.cell(t, 6, _r, str.tostring(array.get(slRR, i), "#.#") + "R", text_color = _tc, text_size = size.tiny)
+            table.cell(t, 7, _r, _aan ? str.tostring(_n) : "—", text_color = _tc, text_size = size.tiny)
+            table.cell(t, 8, _r, _aan ? str.tostring(_w) : "—", text_color = _tc, text_size = size.tiny)
+            table.cell(t, 9, _r, _aan and _n > 0 ? str.tostring(_w / _n * 100, "#") + "%" : "—",
+                 text_color = _tc, text_size = size.tiny)
+            _r := _r + 1
+
+    table.cell(t, 0, _r, syminfo.ticker, text_color = color.new(color.aqua, 0), text_size = size.tiny)
+    table.cell(t, 1, _r, mag ? "preset " + effPreset : "GEEN PRESET",
+         text_color = mag ? color.orange : color.red, text_size = size.tiny)
+    table.cell(t, 3, _r, mag ? "" : "stil — symbool niet in de geverifieerde slots",
+         text_color = color.red, text_size = size.tiny)
+
+_vwKleur = close >= vw ? color.new(color.aqua, 0) : color.new(color.fuchsia, 0)
+plot(toonVwap ? vw : na, "VWAP", color = _vwKleur, linewidth = 2)

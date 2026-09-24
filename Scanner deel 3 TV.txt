@@ -1,0 +1,360 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © eltrudi
+
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+// PRONTO ORB · VASTE SLOTS + SL/RR-GRID v4  (indicator)  —  één symbool, 5m
+//
+// Zelfde 15 vaste entry-modellen als v3 (start, ORB, VWAP-filter, venster
+// liggen per slot vast in f_add(...) in blok ①), maar SL× en RR liggen NIET
+// meer vast per slot: je geeft een lijst SL-multipliers en een lijst
+// RR-multipliers op (blok ②), en elk van de 15 modellen wordt met ELKE
+// combinatie van die twee lijsten getest. Per model toont de tabel de beste
+// combinaties (gesorteerd op EV R, in-sample).
+//
+// Wat je nog kan aanpassen los van deze grid:
+//   - Entry-logica na de box (breakout + VWAP-filter) → blok ④.
+//   - SL-berekening (afstand × SL-multiplier) → blok ④.
+//   - TP-berekening (SL-afstand × RR-multiplier) → blok ④.
+//
+// Eén entry-signaal per slot/dag → dat signaal wordt gebruikt voor ALLE
+// SL×/RR-combinaties tegelijk (zelfde entry, andere SL/TP), zodat je precies
+// ziet welke SL/RR het beste bij dat entry-model past.
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("PRONTO ORB · vaste slots + SL/RR-grid v4", overlay = true,
+     max_boxes_count = 50, max_labels_count = 50, max_lines_count = 50)
+
+gA = "① Vaste entry-modellen (info)"
+gG = "② SL×/RR-grid"
+gB = "③ Tabel & OOS"
+gC = "④ Preview (1 combinatie tekenen)"
+gD = "⑤ Algemeen"
+
+filterSym = input.bool(true, "Tabel: alleen modellen tonen die bij het huidige chart-symbool passen", group = gA)
+
+// ── ② SL×/RR-grid ─────────────────────────────────────────────────────────
+slListStr = input.string("1,1.5,2,2.5,3", "SL-multipliers (komma-gescheiden)", group = gG)
+rrListStr = input.string("1.5,2,2.5,3,3.5,4", "RR-multipliers (komma-gescheiden)", group = gG)
+
+// ── ③ Tabel & OOS ─────────────────────────────────────────────────────────
+minN     = input.int(15, "Min. aantal trades (IS) om mee te tellen in top-N", minval = 1, group = gB)
+topN     = input.int(3, "Top-N combinaties per model", minval = 1, maxval = 5, group = gB)
+houdMin  = input.int(2880, "Max houdtijd (min)", minval = 5, step = 5, group = gB)
+oosPct   = input.int(30, "Out-of-sample: laatste x% van de data (0 = uit)", minval = 0, maxval = 60, group = gB)
+toonTab  = input.bool(true, "Tabel tonen", group = gB)
+
+// ── ④ Preview ─────────────────────────────────────────────────────────────
+pvOn     = input.bool(true, "Preview tekenen", group = gC)
+pvSlot   = input.int(1, "Welk model previewen (1-15, zie tabel)", minval = 1, maxval = 15, group = gC)
+pvSlI    = input.int(1, "Welke SL-multiplier uit de lijst (1e, 2e, ...)", minval = 1, group = gC)
+pvRrI    = input.int(1, "Welke RR-multiplier uit de lijst (1e, 2e, ...)", minval = 1, group = gC)
+lijnBars = input.int(8, "SL/TP lijnlengte (bars)", minval = 2, maxval = 60, group = gC)
+
+// ── ⑤ Algemeen ────────────────────────────────────────────────────────────
+TZ       = input.string("Europe/Brussels", "Tijdzone", options = ["Europe/Brussels", "America/New_York", "GMT+1", "GMT+0"], group = gD)
+vwAnker  = input.string("Sessie", "VWAP-anker", options = ["Sessie", "Dag (tijdzone)"], group = gD)
+toonVwap = input.bool(true, "VWAP tekenen", group = gD)
+
+// ── Types & helpers ───────────────────────────────────────────────────────
+type CTr
+    float e
+    float sd
+    float tp
+    int   dir
+    int   dl
+    int   combo   // index in de combo-arrays (n, w, sumR, ...)
+    bool  oos
+
+f_hm(int m) =>
+    str.format("{0,number,00}:{1,number,00}", math.floor(m / 60), m % 60)
+
+f_pm(float v) =>
+    (v >= 0 ? "+" : "") + str.tostring(v, "0.00")
+
+// ── ① Vaste entry-modellen: symbool, start (min), ORB (min), VWAP (0=Met,1=Tegen), venster (min)
+var array<string> sSym   = array.new<string>()
+var array<int>    sStart = array.new<int>()
+var array<int>    sOrb   = array.new<int>()
+var array<int>    sVwap  = array.new<int>()
+var array<int>    sWin   = array.new<int>()
+
+f_add(string sym, int hh, int mm, int orb, int vw, int win) =>
+    array.push(sSym, sym)
+    array.push(sStart, hh * 60 + mm)
+    array.push(sOrb, orb)
+    array.push(sVwap, vw)
+    array.push(sWin, win)
+
+var array<float> slArr = array.new<float>()
+var array<float> rrArr = array.new<float>()
+
+// ── ORB-tracking (per model, N stuks) en resultaat-arrays (per combo, N×nSL×nRR)
+var array<float> bHi = array.new<float>()
+var array<float> bLo = array.new<float>()
+var array<int>   bSig = array.new<int>()
+var array<int>   cN   = array.new<int>()
+var array<int>   cW   = array.new<int>()
+var array<float> cSumR  = array.new<float>()
+var array<float> cSumR2 = array.new<float>()
+var array<int>   cNo    = array.new<int>()
+var array<float> cSumRo = array.new<float>()
+var array<CTr>   trades = array.new<CTr>()
+var int N    = 0
+var int nSL  = 0
+var int nRR  = 0
+
+if barstate.isfirst
+    f_add("MNQ",    4, 30, 15, 0, 300)
+    f_add("MNQ",    5,  0, 10, 0, 300)
+    f_add("MNQ",    6,  0, 15, 0, 240)
+    f_add("MNQ",    7,  0, 20, 0, 120)
+    f_add("MNQ",    4,  0, 10, 0, 60)
+    f_add("MGC",    5,  0, 30, 0, 120)
+    f_add("MGC",    5, 30, 20, 0, 60)
+    f_add("MGC",    6,  0, 30, 0, 180)
+    f_add("MGC",    3,  0, 10, 0, 60)
+    f_add("UK100", 18, 30, 15, 1, 180)
+    f_add("UK100", 19,  0, 10, 1, 120)
+    f_add("UK100", 18,  0, 10, 1, 180)
+    f_add("GER40", 16, 30, 15, 1, 300)
+    f_add("GER40",  8, 30, 10, 0, 60)
+    f_add("GER40",  8,  0, 25, 0, 60)
+    N := array.size(sStart)
+
+    _slParts = str.split(slListStr, ",")
+    for i = 0 to array.size(_slParts) - 1
+        array.push(slArr, str.tonumber(str.trim(array.get(_slParts, i))))
+    _rrParts = str.split(rrListStr, ",")
+    for i = 0 to array.size(_rrParts) - 1
+        array.push(rrArr, str.tonumber(str.trim(array.get(_rrParts, i))))
+    nSL := array.size(slArr)
+    nRR := array.size(rrArr)
+
+    bHi  := array.new<float>(N, na)
+    bLo  := array.new<float>(N, na)
+    bSig := array.new<int>(N, 0)
+    _tot = N * nSL * nRR
+    cN     := array.new<int>(_tot, 0)
+    cW     := array.new<int>(_tot, 0)
+    cSumR  := array.new<float>(_tot, 0.0)
+    cSumR2 := array.new<float>(_tot, 0.0)
+    cNo    := array.new<int>(_tot, 0)
+    cSumRo := array.new<float>(_tot, 0.0)
+
+// ── Per-bar basis ─────────────────────────────────────────────────────────
+barMin = hour(time, TZ) * 60 + minute(time, TZ)
+newDay = ta.change(time("D")) != 0
+_vwSes = ta.vwap(hlc3)
+_vwDag = ta.vwap(hlc3, newDay)
+vw     = vwAnker == "Sessie" ? _vwSes : _vwDag
+c1     = close[1]
+isOos  = oosPct > 0 and bar_index >= int(last_bar_index * (100 - oosPct) / 100)
+
+var int t0   = na
+var int oosT = na
+if barstate.isfirst
+    t0 := time
+if isOos and na(oosT)
+    oosT := time
+
+if newDay and N > 0
+    array.fill(bHi, na)
+    array.fill(bLo, na)
+    array.fill(bSig, 0)
+
+// ── ③ Lopende trades afhandelen ─────────────────────────────────────────
+if N > 0 and barstate.isconfirmed and array.size(trades) > 0
+    for ti = array.size(trades) - 1 to 0
+        ct  = array.get(trades, ti)
+        _fv = ct.dir == 1 ? high - ct.e : ct.e - low
+        _ad = ct.dir == 1 ? ct.e - low : high - ct.e
+        _mv = ct.dir == 1 ? close - ct.e : ct.e - close
+        float _rs = na
+        bool  _wn = false
+        if _ad >= ct.sd
+            _rs := -ct.sd
+        else if _fv >= ct.tp
+            _rs := ct.tp
+            _wn := true
+        else if time >= ct.dl
+            _rs := _mv
+        if not na(_rs)
+            _rv = _rs / ct.sd
+            _c  = ct.combo
+            if ct.oos
+                array.set(cNo, _c, array.get(cNo, _c) + 1)
+                array.set(cSumRo, _c, array.get(cSumRo, _c) + _rv)
+            else
+                array.set(cN, _c, array.get(cN, _c) + 1)
+                array.set(cW, _c, array.get(cW, _c) + (_wn ? 1 : 0))
+                array.set(cSumR,  _c, array.get(cSumR,  _c) + _rv)
+                array.set(cSumR2, _c, array.get(cSumR2, _c) + _rv * _rv)
+            array.remove(trades, ti)
+
+// ── ④ ORB opbouwen + entry per model, SL/TP per combo ──────────────────────
+// Pas hier de entry-logica (breakout + VWAP-filter) en de SL/TP-berekening aan.
+if N > 0 and barstate.isconfirmed
+    for i = 0 to N - 1
+        _st = array.get(sStart, i)
+        _en = _st + array.get(sOrb, i)
+        _wn = array.get(sWin, i)
+        if barMin >= _st and barMin < _en
+            _h = array.get(bHi, i)
+            _l = array.get(bLo, i)
+            array.set(bHi, i, na(_h) ? high : math.max(_h, high))
+            array.set(bLo, i, na(_l) ? low  : math.min(_l, low))
+        else if barMin >= _en and barMin < _en + _wn and array.get(bSig, i) == 0
+            _hi = array.get(bHi, i)
+            _lo = array.get(bLo, i)
+            if not na(_hi) and not na(_lo)
+                // ── Entry-logica: eerste bar-close die de ORB doorbreekt ──
+                _up = close > _hi and c1 <= _hi
+                _dn = close < _lo and c1 >= _lo
+                if _up or _dn
+                    _lg  = _up
+                    _vv  = array.get(sVwap, i)
+                    _vOk = _vv == 0 ? (_lg ? close > vw : close < vw) : (_lg ? close < vw : close > vw)
+                    if _vOk
+                        array.set(bSig, i, 1)
+                        _d = math.max(_lg ? close - _lo : _hi - close, syminfo.mintick)
+                        // ── SL-berekening en TP-berekening, voor elke SL×/RR-combo ──
+                        for si = 0 to nSL - 1
+                            _sd = _d * array.get(slArr, si)
+                            for ri = 0 to nRR - 1
+                                _tp = _sd * array.get(rrArr, ri)
+                                _ci = i * nSL * nRR + si * nRR + ri
+                                array.push(trades, CTr.new(close, _sd, _tp, _lg ? 1 : 0, time + houdMin * 60000, _ci, isOos))
+
+// ── ⑤ Preview: ORB-box + entry + SL/TP voor één gekozen model + combo ─────
+var float pHi  = na
+var float pLo  = na
+var bool  pSig = false
+var box   pBox = na
+
+if newDay
+    pHi  := na
+    pLo  := na
+    pSig := false
+    pBox := na
+
+if pvOn and N > 0 and nSL > 0 and nRR > 0 and barstate.isconfirmed
+    _pi  = math.min(pvSlot - 1, N - 1)
+    _psi = math.min(pvSlI - 1, nSL - 1)
+    _pri = math.min(pvRrI - 1, nRR - 1)
+    _ps  = array.get(sStart, _pi)
+    _po  = array.get(sOrb, _pi)
+    _pw  = array.get(sWin, _pi)
+    _pv  = array.get(sVwap, _pi)
+    _pSL = array.get(slArr, _psi)
+    _pRR = array.get(rrArr, _pri)
+    _pe  = _ps + _po
+    if barMin >= _ps and barMin < _pe
+        pHi := na(pHi) ? high : math.max(pHi, high)
+        pLo := na(pLo) ? low  : math.min(pLo, low)
+        if na(pBox)
+            pBox := box.new(bar_index, high, bar_index, low,
+                 border_color = color.new(color.orange, 30),
+                 bgcolor = color.new(color.orange, 88),
+                 text = array.get(sSym, _pi) + " " + f_hm(_ps) + " ORB " + str.tostring(_po) + "m  SL×" + str.tostring(_pSL, "#.#") + " " + str.tostring(_pRR, "#.#") + "R",
+                 text_color = color.new(color.orange, 20), text_size = size.tiny)
+        else
+            box.set_right(pBox, bar_index)
+            box.set_top(pBox, pHi)
+            box.set_bottom(pBox, pLo)
+    else if barMin >= _pe and barMin < _pe + _pw and not pSig and not na(pHi) and not na(pBox)
+        box.set_right(pBox, bar_index)
+        _pu = close > pHi and c1 <= pHi
+        _pd = close < pLo and c1 >= pLo
+        if _pu or _pd
+            _pl  = _pu
+            _pOk = _pv == 0 ? (_pl ? close > vw : close < vw) : (_pl ? close < vw : close > vw)
+            if _pOk
+                _pd2 = math.max(_pl ? close - pLo : pHi - close, syminfo.mintick)
+                _pst = _pd2 * _pSL
+                _ptd = _pst * _pRR
+                _slL = _pl ? close - _pst : close + _pst
+                _tpL = _pl ? close + _ptd : close - _ptd
+                pSig := true
+                line.new(bar_index, _slL, bar_index + lijnBars, _slL, color = color.new(color.red, 10), width = 2)
+                line.new(bar_index, _tpL, bar_index + lijnBars, _tpL, color = color.new(color.green, 10), width = 2)
+                label.new(bar_index + lijnBars, _slL, "SL " + str.tostring(_slL, format.mintick), style = label.style_none, textcolor = color.red, size = size.tiny)
+                label.new(bar_index + lijnBars, _tpL, "TP " + str.tostring(_tpL, format.mintick), style = label.style_none, textcolor = color.green, size = size.tiny)
+                label.new(bar_index, _pl ? low : high, "",
+                     style = _pl ? label.style_triangleup : label.style_triangledown,
+                     color = _pl ? color.green : color.red, size = size.tiny)
+
+// ── ⑥ Tabel: top-N SL×/RR-combinaties per vast model ───────────────────────
+if barstate.islast and toonTab and N > 0 and nSL > 0 and nRR > 0
+    var table tb = table.new(position.top_right, 13, N * topN + 2, border_width = 1,
+         frame_color = color.new(color.gray, 40), frame_width = 1)
+    table.clear(tb, 0, 0, 12, N * topN + 1)
+    _hd = array.from("#", "Symbool", "Slot", "ORB", "VWAP", "SL×", "RR", "Venster", "n (IS)", "WR", "EV R (IS)", "t", "OOS R (n)")
+    for c = 0 to array.size(_hd) - 1
+        table.cell(tb, c, 0, array.get(_hd, c), text_color = color.white, bgcolor = color.new(color.teal, 10), text_size = size.tiny)
+
+    _cur = str.upper(syminfo.ticker)
+    int _r = 1
+    for i = 0 to N - 1
+        _sym  = array.get(sSym, i)
+        _show = not filterSym or str.contains(_cur, str.upper(_sym))
+        if _show
+            _combos = nSL * nRR
+            tmpEv   = array.new<float>(_combos, -1e6)
+            for si = 0 to nSL - 1
+                for ri = 0 to nRR - 1
+                    _ci = i * _combos + si * nRR + ri
+                    _n  = array.get(cN, _ci)
+                    if _n >= minN
+                        array.set(tmpEv, si * nRR + ri, array.get(cSumR, _ci) / _n)
+            idx = array.sort_indices(tmpEv, order.descending)
+            _shown = 0
+            for k = 0 to array.size(idx) - 1
+                if _shown >= topN
+                    break
+                _li = array.get(idx, k)
+                if array.get(tmpEv, _li) <= -1e5
+                    continue
+                _si = int(math.floor(_li / nRR))
+                _ri = _li - _si * nRR
+                _ci = i * _combos + _si * nRR + _ri
+                n   = array.get(cN, _ci)
+                w   = array.get(cW, _ci)
+                evr = array.get(cSumR, _ci) / n
+                wr  = w / n * 100
+                vr  = math.max(array.get(cSumR2, _ci) / n - evr * evr, 0.0)
+                sd  = n > 1 ? math.sqrt(vr * n / (n - 1)) : na
+                tt  = (not na(sd) and sd > 0) ? evr / (sd / math.sqrt(n)) : na
+                no  = array.get(cNo, _ci)
+                evo = no > 0 ? array.get(cSumRo, _ci) / no : na
+                tc  = evr > 0 ? color.lime : color.red
+                oc  = na(evo) ? color.gray : evo > 0 ? color.lime : color.red
+
+                table.cell(tb, 0, _r, str.tostring(_r), text_color = color.white, text_size = size.tiny)
+                table.cell(tb, 1, _r, _sym, text_color = color.white, text_size = size.tiny)
+                table.cell(tb, 2, _r, f_hm(array.get(sStart, i)), text_color = color.white, text_size = size.tiny)
+                table.cell(tb, 3, _r, str.tostring(array.get(sOrb, i)) + "m", text_color = color.white, text_size = size.tiny)
+                table.cell(tb, 4, _r, array.get(sVwap, i) == 0 ? "Met" : "Tegen", text_color = color.white, text_size = size.tiny)
+                table.cell(tb, 5, _r, "×" + str.tostring(array.get(slArr, _si), "#.#"), text_color = color.yellow, text_size = size.tiny)
+                table.cell(tb, 6, _r, str.tostring(array.get(rrArr, _ri), "#.#") + "R", text_color = color.yellow, text_size = size.tiny)
+                table.cell(tb, 7, _r, str.tostring(array.get(sWin, i)) + "m", text_color = color.aqua, text_size = size.tiny)
+                table.cell(tb, 8, _r, str.tostring(n), text_color = color.white, text_size = size.tiny)
+                table.cell(tb, 9, _r, str.tostring(wr, "0") + "%", text_color = color.white, text_size = size.tiny)
+                table.cell(tb, 10, _r, str.tostring(evr, "0.00"), text_color = tc, text_size = size.tiny)
+                table.cell(tb, 11, _r, na(tt) ? "—" : str.tostring(tt, "0.0"), text_color = color.silver, text_size = size.tiny)
+                table.cell(tb, 12, _r, na(evo) ? "—" : f_pm(evo) + " (" + str.tostring(no) + ")", text_color = oc, text_size = size.tiny)
+                _r += 1
+                _shown += 1
+
+    if _r == 1
+        table.cell(tb, 0, 1, "geen combinaties met genoeg trades (verlaag min. aantal trades)", text_color = color.gray, text_size = size.tiny)
+
+    var table ib = table.new(position.bottom_right, 2, 3, border_width = 1,
+         frame_color = color.new(color.gray, 40), frame_width = 1)
+    table.cell(ib, 0, 0, "Data van", text_color = color.white, bgcolor = color.new(color.teal, 10), text_size = size.tiny)
+    table.cell(ib, 1, 0, str.format_time(t0, "dd-MM-yyyy HH:mm", TZ), text_color = color.white, text_size = size.tiny)
+    table.cell(ib, 0, 1, "Data tot", text_color = color.white, bgcolor = color.new(color.teal, 10), text_size = size.tiny)
+    table.cell(ib, 1, 1, str.format_time(time, "dd-MM-yyyy HH:mm", TZ), text_color = color.white, text_size = size.tiny)
+    table.cell(ib, 0, 2, "OOS vanaf", text_color = color.white, bgcolor = color.new(color.teal, 10), text_size = size.tiny)
+    table.cell(ib, 1, 2, oosPct > 0 and not na(oosT) ? str.format_time(oosT, "dd-MM-yyyy HH:mm", TZ) : "uit", text_color = color.white, text_size = size.tiny)
+
+plot(toonVwap ? vw : na, "VWAP", color = close >= vw ? color.new(color.aqua, 0) : color.new(color.fuchsia, 0), linewidth = 2)
