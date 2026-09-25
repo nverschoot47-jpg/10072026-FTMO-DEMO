@@ -97,9 +97,9 @@ const FIRMS = {
     label: 'FTMO',
     symbols: {
       'MGC1!' : 'XAUUSD',      // Micro Gold   -> futures→CFD, wordt geschaald
-      'MNQ1!' : 'US100',  // Micro Nasdaq -> futures→CFD, wordt geschaald
-      'GER40' : 'GER40',  // DAX          -> 1-op-1, basis ~0%
-      'UK100' : 'UK100',  // FTSE 100     -> 1-op-1, basis ~0%
+      'MNQ1!' : 'US100.cash',  // Micro Nasdaq -> futures→CFD, wordt geschaald
+      'GER40' : 'GER40.cash',  // DAX          -> 1-op-1, basis ~0%
+      'UK100' : 'UK100.cash',  // FTSE 100     -> 1-op-1, basis ~0%
     },
   },
 
