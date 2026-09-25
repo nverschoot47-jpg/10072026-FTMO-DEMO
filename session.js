@@ -37,7 +37,7 @@ export const ACCOUNT_CCY = (process.env.ACCOUNT_CCY
 // RISK_EUR blijft als naam bestaan zodat server.js ongewijzigd blijft; lees hem
 // als "risicobedrag in rekeningvaluta".
 export const RISK_EUR = parseFloat(
-  process.env.RISK_PER_TRADE || process.env.RISK_EUR || '150');
+  process.env.RISK_PER_TRADE || process.env.RISK_EUR || '300');
 
 // ── Remmen ────────────────────────────────────────────────────────────────
 // Op Vantage stonden deze op 0 (= uit). Dat kan daar: het is je eigen geld en
@@ -50,7 +50,8 @@ export const RISK_EUR = parseFloat(
 //
 // Standaard nu AAN. Reken ze zelf na tegen je eigen accountgrootte:
 //   MAX_RISK_TOTAL moet ruim ONDER je daily loss limit blijven.
-//   Bij ~49.000 saldo is de 5%-dagbreuk ~2.450; 1.500 laat marge over.
+//   Bij ~49.000 saldo is de 5%-dagbreuk ~2.450; check dat RISK_EUR x MAX_OPEN
+//   dat niet overschrijdt nu RISK_EUR omhoog is naar 300.
 // Op 0 zetten = weer uit, maar doe dat op een prop-rekening niet.
 export const MAX_OPEN       = parseInt(process.env.MAX_OPEN_POSITIONS || '10', 10);
 export const MAX_RISK_TOTAL = parseFloat(process.env.MAX_RISK_TOTAL
@@ -78,24 +79,27 @@ export const MAX_BASIS_PCT    = parseFloat(process.env.MAX_BASIS_PCT || '5');
 // Symbolen die de PineScript stuurt maar die hieronder NIET staan, worden
 // geweigerd met "geen symboolmapping" — gelogd, niet geplaatst. Dat is de
 // bedoeling: liever niets dan het verkeerde instrument.
+//
+// FTMO gebruikt precies 4 symbolen: XAUUSD, US100.cash, GER40.cash, UK100.cash.
+// AUDCAD staat wel als quote in de MT5-app (screenshot), maar hoort niet in
+// deze strategie-mapping thuis en is hier bewust niet toegevoegd.
 const FIRMS = {
   // ── FTMO — LIVE ──────────────────────────────────────────────────────────
   // Afgelezen uit Market Watch (4 sep 2026). FTMO hangt er een `.cash`-suffix
   // aan bij indices; goud niet. Drie brokers, drie namen voor dezelfde Nasdaq:
   // NAS100 (Vantage), NDX100 (FundedNext), US100.cash (FTMO).
   //
-  // LET OP wat hier NIET staat: zilver, olie en de vier crypto's stonden wél in
-  // de Vantage-mapping maar niet in jouw FTMO Market Watch. Vuurt de PineScript
-  // op die charts, dan worden die signalen geweigerd. Wil je ze meenemen, voeg
-  // ze dan eerst in MT5 toe (Symbols -> Show All), lees de specs af, en zet ze
-  // hieronder én in SPECS bij.
+  // LET OP wat hier NIET staat: zilver, olie, de vier crypto's en AUDCAD staan
+  // niet in deze mapping. Vuurt de PineScript op die charts, dan worden die
+  // signalen geweigerd. Wil je ze meenemen, voeg ze dan eerst in MT5 toe
+  // (Symbols -> Show All), lees de specs af, en zet ze hieronder én in SPECS bij.
   ftmo: {
     label: 'FTMO',
     symbols: {
       'MGC1!' : 'XAUUSD',      // Micro Gold   -> futures→CFD, wordt geschaald
-      'MNQ1!' : 'US100.cash',  // Micro Nasdaq -> futures→CFD, wordt geschaald
-      'GER40' : 'GER40.cash',  // DAX          -> 1-op-1, basis ~0%
-      'UK100' : 'UK100.cash',  // FTSE 100     -> 1-op-1, basis ~0%
+      'MNQ1!' : 'US100',  // Micro Nasdaq -> futures→CFD, wordt geschaald
+      'GER40' : 'GER40',  // DAX          -> 1-op-1, basis ~0%
+      'UK100' : 'UK100',  // FTSE 100     -> 1-op-1, basis ~0%
     },
   },
 
