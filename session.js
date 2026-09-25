@@ -103,17 +103,6 @@ const FIRMS = {
     },
   },
 
-Mynewfirm: {
-  label: 'MyNewFirm',
-  symbols: {
-    'MGC1!' : 'XAUUSD',   // Micro Gold
-    'MNQ1!' : 'US100',    // Micro Nasdaq
-    'GER40' : 'GER40',
-    'UK100' : 'UK100',
-    // ...whatever symbols this firm actually supports
-  },
-},
-
   // ── Vantage — bewaard, ongewijzigd ───────────────────────────────────────
   vantage: {
     label: 'Vantage',
