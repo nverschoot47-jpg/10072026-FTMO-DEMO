@@ -37,7 +37,7 @@ export const ACCOUNT_CCY = (process.env.ACCOUNT_CCY
 // RISK_EUR blijft als naam bestaan zodat server.js ongewijzigd blijft; lees hem
 // als "risicobedrag in rekeningvaluta".
 export const RISK_EUR = parseFloat(
-  process.env.RISK_PER_TRADE || process.env.RISK_EUR || '300');
+  process.env.RISK_PER_TRADE || process.env.RISK_EUR || '150');
 
 // ── Remmen ────────────────────────────────────────────────────────────────
 // Op Vantage stonden deze op 0 (= uit). Dat kan daar: het is je eigen geld en
